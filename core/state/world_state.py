@@ -27,7 +27,7 @@ class WorldState:
         self.world_grid = WorldGrid(width, height)
         self.genealogy_system: Any = None
         self.epidemiological_map = EpidemiologicalMap()
-        self.world_days_elapsed = 0
+        self.world_days_elapsed = 0.0
         
     def add_person(self, person: Person) -> None:
         self.persons[person.entity_id] = person

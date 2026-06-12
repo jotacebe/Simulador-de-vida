@@ -1,131 +1,155 @@
 """
 Ruta: launcher.py
+Responsabilidad: Punto de entrada principal del simulador. Orquesta todos los 
+                 sistemas biológicos (concepción, gestación, mortalidad), espaciales
+                 y conductuales en un ecosistema de tiempo continuo.
 """
-import random
 import logging
+import random
+from typing import Any
 
-# Núcleo y Estado
+# Importaciones de tu arquitectura de estados
 from core.state.world_state import WorldState
-from core.engine.tick_manager import TickManager
-from core.execution.execution_pipeline import ExecutionPipeline
-from core.config.simulation_config import SimulationConfig
-from events.event_bus import EventBus
+from core.state.pending_changes import PendingChanges
+from entities.person.person import Person
+from entities.person.genome import Genome
 
-# Sistemas
-from systems.environment.density_system import DensitySystem
-from systems.environment.environment_system import EnvironmentSystem
+# Importaciones de Sistemas
+from systems.environment.environment_context import EnvironmentContext
+from systems.evolution.evolution_engine import EvolutionEngine
 from systems.movement.movement_system import MovementSystem
-from systems.diseases.disease_system import DiseaseSystem
+from systems.movement.movement_resolver import MovementResolver
+from systems.behavior.cognitive_memory_system import CognitiveMemorySystem
 from systems.mortality.mortality_system import MortalitySystem
 from systems.reproduction.conception_system import ConceptionSystem
 from systems.reproduction.gestation_system import GestationSystem
-from systems.relationships.relationship_system import RelationshipSystem
-from systems.adoptions.adoption_system import AdoptionSystem
-from systems.metrics.metrics_system import MetricsSystem 
-from systems.aging.aging_system import AgingSystem
-from systems.genealogy.genealogy_system import GenealogySystem
-from systems.genealogy.ancestry_queries import AncestryQueries
-from systems.free_will.free_will_system import FreeWillSystem
 
-from entities.person.person import Person
+# Configuración de logging para observar el ecosistema
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
-def inicializar_poblacion_test(state: WorldState, count: int, map_w: int, map_h: int) -> None:
-    for i in range(1, count + 1):
-        # Usamos valores iniciales seguros
-        pos_x = random.randint(0, map_w - 1)
-        pos_y = random.randint(0, map_h - 1)
+class MockRelationshipSystem:
+    """Mock temporal para el anclaje social del sistema de movimiento."""
+    def get_social_anchor(self, person: Any, state: Any) -> Any:
+        return None
+
+class SimulationLauncher:
+    """Motor de orquestación principal de la simulación evolutiva."""
+
+    def __init__(self) -> None:
+        self.logger: logging.Logger = logging.getLogger("SimulationLauncher")
         
-        # CORRECCIÓN VITAL: La edad ahora se rige por la fuente única de verdad (días).
-        # Multiplicamos por 365.0 para que se generen adultos funcionales y fértiles.
-        edad_en_dias = float(random.randint(16, 40) * 365.0)
+        # 1. OBJETO DE CONFIGURACIÓN
+        class Config:
+            class evolution:
+                snapshot_interval_days: float = 30.0  # Reportes evolutivos mensuales
+            class movement:
+                movement_speed: float = 2.0
+            class reproduction:
+                base_conception_chance: float = 0.15
+                pregnancy_duration_days: float = 270.0
+                base_daily_miscarriage_rate: float = 0.0005
+            class mortality:
+                hard_cap_age_days: float = 30000.0  # ~82 años límite celular base
+                global_carrying_capacity: int = 150
         
-        individuo = Person(entity_id=i, age=edad_en_dias, x=pos_x, y=pos_y)
-        state.add_person(individuo)
+        self.config: Any = Config()
+        
+        # 2. INSTANCIACIÓN DE TODOS LOS SISTEMAS
+        self.memory_system: CognitiveMemorySystem = CognitiveMemorySystem(self.config)
+        self.movement_system: MovementSystem = MovementSystem(self.config, density_system=None, relationship_system=MockRelationshipSystem())
+        self.evolution_engine: EvolutionEngine = EvolutionEngine(self.config, ancestry_queries=None)
+        self.mortality_system: MortalitySystem = MortalitySystem(self.config)
+        self.conception_system: ConceptionSystem = ConceptionSystem(self.config)
+        self.gestation_system: GestationSystem = GestationSystem(self.config, evolution_engine=self.evolution_engine)
+        
+        self.logger.info("🚀 Todos los sistemas integrados. El motor ecosistémico está listo.")
 
-def bootstrap_engine():
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-    logger = logging.getLogger("Launcher")
-    
-    # 1. FUENTE DE VERDAD: Configuración única
-    config = SimulationConfig()
-    
-    ancho_mapa, alto_mapa = 40, 40
-    poblacion_inicial = 50
-
-    event_bus = EventBus()
-    world_state = WorldState(config=config, width=ancho_mapa, height=alto_mapa)
-    tick_manager = TickManager()
-
-    # 2. SERVICIOS Y DEPENDENCIAS
-    # Primero servicios que otros sistemas pueden necesitar
-    genealogy_system = GenealogySystem(config)
-    world_state.genealogy_system = genealogy_system
-    ancestry_service = AncestryQueries(genealogy_system)
-
-    # 3. INICIALIZACIÓN DE SISTEMAS (Patrón: config primero, dependencias después)
-    # Sistemas simples
-    density_system = DensitySystem(config)
-    environment_system = EnvironmentSystem(config)
-    disease_system = DiseaseSystem(config)
-    mortality_system = MortalitySystem(config)
-    
-    # CORRECCIÓN: Instanciamos los dos sistemas de reproducción separados
-    conception_system = ConceptionSystem(config)
-    gestation_system = GestationSystem(config)
-    
-    adoption_system = AdoptionSystem(config)
-    aging_system = AgingSystem(config)
-    metrics_system = MetricsSystem(config)
-    free_will_system = FreeWillSystem(config)
-
-    # Sistemas con dependencias
-    relationship_system = RelationshipSystem(config, ancestry_queries=ancestry_service)
-    movement_system = MovementSystem(config, density_system=density_system, relationship_system=relationship_system)
-
-    # 4. PIPELINE DE EJECUCIÓN
-    pipeline_sistemas = [
-        genealogy_system, 
-        aging_system, 
-        density_system, 
-        environment_system, 
-        movement_system,
-        disease_system, 
-        mortality_system, 
-        conception_system,
-        gestation_system,
-        relationship_system, 
-        adoption_system, 
-        metrics_system,
-        free_will_system
-    ]
-
-    execution_pipeline = ExecutionPipeline(systems=pipeline_sistemas, event_bus=event_bus)
-    
-    # Inicialización del estado
-    inicializar_poblacion_test(world_state, poblacion_inicial, ancho_mapa, alto_mapa)
-
-    logger.info("Motor inicializado. Arrancando simulación...")
-    
-    try:
-        while tick_manager.current_tick < 200:
-            delta_days = tick_manager.advance_tick()
-            execution_pipeline.execute_tick(world_state, tick_manager.current_tick, delta_days)
+    def run(self, total_days: float, delta_days: float) -> None:
+        """Ejecuta el bucle cronológico principal."""
+        state: WorldState = WorldState(config=self.config, width=100, height=100)
+        
+        # ─── POBLACIÓN FUNDADORA (GENERACIÓN 0) ───
+        self.logger.info("🧬 Generando 50 individuos fundadores de la Generación 0...")
+        for i in range(1, 51):
+            gen = Genome()
             
-            # Control de extinción
-            if len(world_state.get_all_persons()) == 0:
-                logger.warning(f"Extinción total en tick {tick_manager.current_tick}. Abortando.")
-                break
+            # Inicialización robusta (soporta diccionarios y propiedades directas)
+            stress_val = random.uniform(0.3, 0.8)
+            fert_val = random.uniform(0.5, 0.9)
+            imm_val = random.uniform(0.4, 0.8)
+            long_val = random.uniform(0.4, 0.8)
             
-            # Logs periódicos
-            if tick_manager.current_tick % 10 == 0:
-                stats = metrics_system.get_latest_metrics()
-                logger.info(f"[Tick {tick_manager.current_tick:03d}] Población: {stats.get('population', 0)}")
+            # 1. Como atributos directos (requerido por Person)
+            gen.stress_resistance = stress_val
+            gen.fertility = fert_val
+            gen.immunity = imm_val
+            gen.longevity = long_val
+            
+            # 2. Como diccionario interno (si tu clase Genome lo expone)
+            if hasattr(gen, 'genes') and isinstance(gen.genes, dict):
+                gen.genes['stress_resistance'] = stress_val
+                gen.genes['fertility'] = fert_val
+                gen.genes['immunity'] = imm_val
+                gen.genes['longevity'] = long_val
+            
+            p = Person(
+                entity_id=i, 
+                age=random.uniform(6500.0, 11000.0),  # Tienen entre 17 y 30 años en días biológicos
+                x=random.randint(10, 90), 
+                y=random.randint(10, 90), 
+                genome=gen
+            )
+            
+            p.set_health_state("sano")
+            p._is_adult = True
+            p.update_pregnancy(False, 0.0)
+            
+            partner = i + 1 if i % 2 != 0 else i - 1
+            p.register_marriage(partner)
+            
+            state.add_person(p)
 
-    except Exception as e:
-        logger.critical(f"Fallo catastrófico: {e}", exc_info=True)
-    finally:
-        metrics_system.export_to_json("simulation_metrics.json")
-        execution_pipeline.export_simulation_data("data_historica.json")
+        current_day: float = 0.0
+        self.logger.info(f"🟢 Iniciando simulación de {total_days} días (Tick Δt = {delta_days} días).")
+
+        # ─── BUCLE EVOLUTIVO CONTINUO ───
+        while current_day < total_days:
+            state.world_days_elapsed = current_day
+            pending: PendingChanges = PendingChanges()
+            context: EnvironmentContext = EnvironmentContext(state, sector_size=10, carrying_capacity=200)
+
+            # 1. Conducta y Libre Albedrío
+            self.memory_system.process(state, pending, delta_days, context)
+            self.movement_system.process(state, pending, delta_days, context)
+
+            # 2. Ciclo de Vida (Reproducción)
+            self.conception_system.process(state, pending, delta_days, context)
+            self.gestation_system.process(state, pending, delta_days, context)
+
+            # 3. Criba de Selección (Mortalidad)
+            self.mortality_system.process(state, pending, delta_days, context)
+
+            # 4. Física y Colisiones de Posición
+            MovementResolver.resolve(pending, state)
+
+            # 5. El tiempo avanza inevitablemente
+            # Registramos el incremento de edad en el buffer ANTES del commit
+            for person in state.get_all_persons():
+                pending.register_age_increment(person.entity_id, delta_days)
+
+            # 6. UNICO COMMIT ATÓMICO
+            # Tu world_state procesa secuencialmente todo el buffer limpio y ordenado
+            state.apply_commit(pending)
+
+            # 7. Telemetría Darwiniana
+            self.evolution_engine.process(state, pending, delta_days, context)
+
+            current_day += delta_days
+
+        self.logger.info("🏁 Simulación de un año completada. Exportando datos históricos...")
+        self.evolution_engine.export_to_json(state, "historico_evolucion.json")
 
 if __name__ == "__main__":
-    bootstrap_engine()
+    launcher = SimulationLauncher()
+    # Ejecutamos 365 días (1 año completo)
+    launcher.run(total_days=365.0, delta_days=1.0)
