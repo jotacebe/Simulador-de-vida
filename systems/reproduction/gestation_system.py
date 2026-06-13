@@ -10,10 +10,11 @@ from entities.person.genome import Genome
 from systems.environment.environment_context import EnvironmentContext
 
 class GestationSystem:
-    def __init__(self, config):
+    def __init__(self, config, evolution_engine=None):
         self.logger = logging.getLogger("GestationSystem")
         self.config = config
-
+        self.evolution_engine = evolution_engine
+        
     def process(self, state: WorldState, pending: PendingChanges, delta_days: float, context: EnvironmentContext) -> None:
         """Hace avanzar los embarazos y ejecuta los partos."""
         

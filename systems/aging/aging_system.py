@@ -1,30 +1,34 @@
-"""
-Ruta: systems/aging/aging_system.py
-Responsabilidad: Incrementar la edad biológica de los agentes de forma continua 
-                 basándose en el tiempo transcurrido (delta_days).
-"""
+"""Módulo responsable de la progresión temporal y envejecimiento biológico de los agentes."""
+
 from core.state.world_state import WorldState
 from core.state.pending_changes import PendingChanges
 from systems.environment.environment_context import EnvironmentContext
+from core.config.simulation_config import SimulationConfig
 
 class AgingSystem:
-    def __init__(self, config):
+    """Incrementa la edad biológica de las entidades de forma continua.
+    
+    Aplica el paso del tiempo transcurrido (delta temporal) a todos los individuos
+    activos en el ecosistema, operando estrictamente en unidades de días.
+    """
+
+    def __init__(self, config: SimulationConfig) -> None:
+        """Inicializa el sistema vinculándolo a la configuración centralizada."""
         self.config = config
 
-    def process(self, state: WorldState, pending: PendingChanges, delta_days: float, context: EnvironmentContext) -> None:
-        """
-        Incrementa la edad de cada agente vivo de forma proporcional al delta_days.
-        """
+    def process(self, state: WorldState, pending: PendingChanges, 
+                delta_days: float, context: EnvironmentContext) -> None:
+        """Añade el tiempo transcurrido a la edad biológica de los agentes vivos."""
+        
         for person in state.get_all_persons():
-            # Si el agente está muerto, no se le hace envejecer
+            # Filtro de integridad referencial: omitimos a los individuos que 
+            # ya han sido marcados como fallecidos en este mismo tick temporal.
             if person.entity_id in pending.deaths:
                 continue
             
-            # Cálculo del incremento: 
-            # Si un año son 365 días, envejecer 1 día significa sumar 1/365 años.
-            # O, si tu edad se cuenta en días (que es lo que unificamos), simplemente sumamos delta_days.
-            
+            # Al estar la arquitectura unificada en días, el incremento temporal
+            # es una asignación directa del avance del reloj del motor.
             increment = delta_days
             
-            # Registramos la intención de incremento en el buffer transaccional
+            # Registramos la mutación de estado de forma segura en el búfer transaccional.
             pending.register_age_increment(person.entity_id, increment)

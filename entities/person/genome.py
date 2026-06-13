@@ -1,17 +1,14 @@
-"""
-Ruta: entities/person/genome.py
-Responsabilidad: Almacenar los rasgos hereditarios de una entidad y proporcionar
-                 la capacidad de recombinación (cruce) con otros genomas,
-                 incorporando la deriva genética y evolución poblacional real.
-"""
+"""Módulo que define la genética y herencia de las entidades del simulador."""
+
 import random
 
 class Genome:
+    """Representa el conjunto de rasgos genéticos de una entidad y su evolución."""
+
     def __init__(self, longevity: float = 1.0, sociability: float = 1.0, 
                  temperament: float = 1.0, fertility: float = 1.0, 
-                 immunity: float = 1.0): 
-        
-        # Datos privados
+                 immunity: float = 1.0):
+        """Inicializa un nuevo genoma con valores biológicos base."""
         self._longevity = longevity
         self._sociability = sociability
         self._temperament = temperament
@@ -19,28 +16,60 @@ class Genome:
         self._immunity = immunity
 
     @property
-    def longevity(self) -> float: return self._longevity
+    def longevity(self) -> float:
+        """Devuelve el factor de longevidad de la entidad."""
+        return self._longevity
+    
+    @longevity.setter
+    def longevity(self, value: float) -> None:
+        """Establece el factor de longevidad de la entidad."""
+        self._longevity = value
 
     @property
-    def sociability(self) -> float: return self._sociability
+    def sociability(self) -> float:
+        """Devuelve el factor de sociabilidad de la entidad."""
+        return self._sociability
+    
+    @sociability.setter
+    def sociability(self, value: float) -> None:
+        """Establece el factor de sociabilidad de la entidad."""
+        self._sociability = value
 
     @property
-    def temperament(self) -> float: return self._temperament
+    def temperament(self) -> float:
+        """Devuelve el factor de temperamento de la entidad."""
+        return self._temperament
+    
+    @temperament.setter
+    def temperament(self, value: float) -> None:
+        """Establece el factor de temperamento de la entidad."""
+        self._temperament = value
 
     @property
-    def fertility(self) -> float: return self._fertility
+    def fertility(self) -> float:
+        """Devuelve el factor de fertilidad de la entidad."""
+        return self._fertility
+    
+    @fertility.setter
+    def fertility(self, value: float) -> None:
+        """Establece el factor de fertilidad de la entidad."""
+        self._fertility = value
 
     @property
-    def immunity(self) -> float: return self._immunity
+    def immunity(self) -> float:
+        """Devuelve el factor de inmunidad de la entidad."""
+        return self._immunity
+    
+    @immunity.setter
+    def immunity(self, value: float) -> None:
+        """Establece el factor de inmunidad de la entidad."""
+        self._immunity = value
 
-    # ==========================================
-    # COMPORTAMIENTO GENÉTICO (Motor Integrado)
-    # ==========================================
     def combine(self, other_genome: 'Genome') -> 'Genome':
-        """
-        Calcula los genes de un recién nacido.
-        Integra la lógica de herencia (promedio), mutación (deriva genética) 
-        y clamping (límites biológicos) para evitar la creación de superhumanos.
+        """Combina este genoma con otro para generar un nuevo descendiente.
+
+        Aplica herencia por promedio, añade deriva genética mediante mutación
+        y restringe los valores resultantes dentro de los límites biológicos.
         """
         def get_inherited_value(v1: float, v2: float) -> float:
             # 1. Herencia (Promedio de los padres)

@@ -1,32 +1,47 @@
-"""
-Ruta: systems/metrics/metrics_system.py
-Responsabilidad: Recolección y exportación de datos demográficos y biológicos 
-                 normalizados por el tiempo transcurrido del mundo (conversión a años para reportes).
-"""
+"""Módulo responsable de la recolección y exportación de datos demográficos."""
+
 import json
 import logging
 from typing import Dict, List, Any
 from core.state.world_state import WorldState
 from core.state.pending_changes import PendingChanges
 from systems.environment.environment_context import EnvironmentContext
+from core.config.simulation_config import SimulationConfig
 
 class MetricsSystem:
-    def __init__(self, config):
+    """Recolecta métricas demográficas normalizadas por el tiempo transcurrido."""
+
+    def __init__(self, config: SimulationConfig) -> None:
+        """Inicializa el sistema de métricas con la configuración central."""
         self.config = config
         self.history: List[Dict[str, Any]] = []
         self.total_days_elapsed = 0.0
+        self.last_snapshot_time = -1.0  # Para forzar la primera captura en el día 0
         self.logger = logging.getLogger("MetricsSystem")
-    
+
     def get_latest_metrics(self) -> Dict[str, Any]:
-        """Devuelve el último snapshot de métricas si existe, si no, devuelve un dict vacío."""
+        """Devuelve el último snapshot de métricas si existe."""
         return self.history[-1] if self.history else {}
 
-    def process(self, state: WorldState, pending: PendingChanges, delta_days: float, context: EnvironmentContext) -> None:
+    def process(self, state: WorldState, pending: PendingChanges, 
+                delta_days: float, context: EnvironmentContext) -> None:
+        """Calcula las estadísticas globales de la población viva en el tick actual."""
         self.total_days_elapsed += delta_days
-        persons = state.get_all_persons()
-        total_pop = len(persons)
         
-        # Snapshot básico con manejo de seguridad
+        # Acceso limpio a la configuración
+        interval = getattr(self.config.metrics, 'snapshot_interval_days', 1.0)
+
+        # Optimización de RAM: Solo tomamos métricas según el intervalo configurado
+        if (self.total_days_elapsed - self.last_snapshot_time) < interval and self.total_days_elapsed > 0:
+            return
+
+        self.last_snapshot_time = self.total_days_elapsed
+
+        # 1. FILTRADO (Integridad Referencial): Omitimos a las entidades recién fallecidas
+        alive_persons = [p for p in state.get_all_persons() if p.entity_id not in pending.deaths]
+        total_pop = len(alive_persons)
+        
+        # Snapshot base estructural
         snapshot = {
             "day": round(self.total_days_elapsed, 2),
             "year": round(self.total_days_elapsed / 365.0, 2),
@@ -38,13 +53,23 @@ class MetricsSystem:
         }
 
         if total_pop > 0:
-            total_age_days = sum(p.age for p in persons)
-            total_longevity = sum(p.genome.longevity for p in persons)
+            total_age_days = 0.0
+            total_longevity = 0.0
+            sick_count = 0
+            married_count = 0
+
+            # 2. OPTIMIZACIÓN O(N): Bucle único para recolectar todas las métricas
+            for p in alive_persons:
+                total_age_days += getattr(p, 'age', 0.0)
+                # Introspección segura para evitar cuelgues si un gen no existe
+                total_longevity += getattr(getattr(p, 'genome', None), 'longevity', 0.0)
+                
+                if getattr(p, 'is_sick', False):
+                    sick_count += 1
+                if getattr(p, 'marital_status', "") == "casado":
+                    married_count += 1
             
-            sick_count = sum(1 for p in persons if p.is_sick)
-            married_count = sum(1 for p in persons if p.marital_status == "casado")
-            
-            # TRANSFORMAZIÓN: Calculamos la edad media convirtiendo los días biológicos a años humanos
+            # TRANSFORMACIÓN: Convertimos los días biológicos a años humanos
             avg_age_years = (total_age_days / total_pop) / 365.0
 
             snapshot.update({
@@ -57,6 +82,7 @@ class MetricsSystem:
         self.history.append(snapshot)
 
     def export_to_json(self, filepath: str = "simulation_metrics.json") -> None:
+        """Exporta la serie temporal de métricas a un archivo JSON en disco."""
         try:
             with open(filepath, "w", encoding="utf-8") as f:
                 json.dump(self.history, f, indent=4, ensure_ascii=False)
