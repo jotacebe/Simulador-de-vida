@@ -1,52 +1,57 @@
-"""
-Ruta: systems/reproduction/conception_system.py
-Responsabilidad: Evaluar exclusivamente la "chispa" inicial. Revisa parejas fértiles 
-                 y calcula la probabilidad de concepción normalizada por delta_days.
-"""
+"""Módulo responsable de la transición de estado hacia la gestación biológica."""
+
 import random
+import math
 import logging
 from core.state.world_state import WorldState
 from core.state.pending_changes import PendingChanges
 from systems.environment.environment_context import EnvironmentContext
+from core.config.simulation_config import SimulationConfig
 
 class ConceptionSystem:
-    def __init__(self, config):
-        self.logger = logging.getLogger("ConceptionSystem")
-        self.config = config
+    """Gestiona la iniciación de la gestación basándose en probabilidad continua."""
 
-    def process(self, state: WorldState, pending: PendingChanges, delta_days: float, context: EnvironmentContext) -> None:
-        """Procesa concepciones utilizando únicamente días como métrica temporal continua."""
+    def __init__(self, config: SimulationConfig) -> None:
+        """Inicializa el motor de concepción vinculando la configuración central."""
+        self.config = config
+        self.logger = logging.getLogger("ConceptionSystem")
+
+    def process(self, state: WorldState, pending: PendingChanges, 
+                delta_days: float, context: EnvironmentContext) -> None:
+        """Procesa intentos de concepción utilizando el modelo exponencial continuo."""
         
-        cfg = getattr(self.config, 'reproduction', {})
-        if isinstance(cfg, dict):
-            base_conception = cfg.get("base_conception_chance", 0.15)
-        else:
-            base_conception = getattr(cfg, "base_conception_chance", 0.15)
+        rep_cfg = self.config.reproduction
         
-        # Obtenemos la tasa diaria matemática
-        daily_base_conception_chance = base_conception / 365.0
+        # Transformamos la probabilidad base (anual) a tasa diaria pura
+        daily_rate = rep_cfg.base_conception_chance / 365.0
+        
+        # Probabilidad base acumulada para el periodo delta_days (Integración de Poisson)
+        base_prob_period = 1.0 - math.exp(-daily_rate * delta_days)
 
         for person in state.get_all_persons():
-            if person.entity_id in pending.deaths:
+            # 1. Filtros de integridad referencial y de estado biológico
+            if person.entity_id in pending.deaths or getattr(person, 'is_pregnant', False):
                 continue
 
-            # Si ya está embarazada, de la gestación se encarga otro sistema
-            if person.is_pregnant:
-                continue
-
-            # CONCEPCIÓN
-            if person.can_reproduce() and person.partner_id:
+            # 2. Verificación de capacidad reproductiva y existencia de pareja
+            if getattr(person, 'partner_id', None) and person.can_reproduce():
                 partner = state.get_person_by_id(person.partner_id)
                 
-                if partner and partner.can_reproduce():
-                    # Probabilidad según los días transcurridos
-                    conception_chance_for_period = daily_base_conception_chance * delta_days
+                # Blindaje: Garantizamos que la pareja existe, está viva y es fértil
+                if partner and partner.entity_id not in pending.deaths and partner.can_reproduce():
                     
-                    # Modificador por ADN fértil
+                    # 3. Modificador genético de fertilidad
+                    # Promediamos la expresión del gen de fertilidad de ambos progenitores
                     fertility_modifier = (person.genome.fertility + partner.genome.fertility) / 2.0
-                    final_chance = conception_chance_for_period * fertility_modifier
-
+                    
+                    # Probabilidad final ajustada fenotípicamente
+                    final_chance = base_prob_period * fertility_modifier
+                    
                     if random.random() < final_chance:
-                        # Concepción exitosa, lanzamos la señal al búfer
-                        pending.register_pregnancy_update(person.entity_id, is_pregnant=True, pregnancy_days=0.0)
-                        self.logger.debug(f"Concepción exitosa: {person.entity_id}")
+                        # 4. Registro transaccional del nuevo estado en el búfer
+                        pending.register_pregnancy_update(
+                            person.entity_id, 
+                            is_pregnant=True, 
+                            pregnancy_days=0.0
+                        )
+                        self.logger.debug(f"Concepción iniciada para agente: {person.entity_id}")

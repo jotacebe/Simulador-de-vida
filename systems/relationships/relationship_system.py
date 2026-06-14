@@ -1,86 +1,85 @@
-"""
-Ruta: systems/relationships/relationship_system.py
-Responsabilidad: Gestión de cortejo y matrimonios normalizada por tiempo real (días).
-                 Aplica Selección Sexual basada en Sociabilidad y Temperamento.
-"""
+"""Módulo responsable de la evolución a largo plazo de las relaciones interpersonales."""
+
 import random
 import math  
+import logging
 from typing import Any, List
 from core.state.world_state import WorldState
 from core.state.pending_changes import PendingChanges
-from entities.person.person import Person
 from systems.environment.environment_context import EnvironmentContext
+from core.config.simulation_config import SimulationConfig
 
 class RelationshipSystem:
-    def __init__(self, config, ancestry_queries: Any = None):
+    """Gestiona la maduración de relaciones aplicando selección sexual y social."""
+
+    def __init__(self, config: SimulationConfig, ancestry_queries: Any = None) -> None:
+        """Inicializa el sistema vinculándolo a la configuración."""
         self.config = config
         self.ancestry_queries = ancestry_queries
-        
-        # Extracción de la tasa base diaria
-        repro_cfg = getattr(config, 'relationships', {})
-        if isinstance(repro_cfg, dict):
-            self.daily_base_rate = repro_cfg.get("daily_marriage_rate", 0.00137)
-        else:
-            self.daily_base_rate = getattr(repro_cfg, "daily_marriage_rate", 0.00137)
+        self.logger = logging.getLogger("RelationshipSystem")
 
-    def process(self, state: WorldState, pending: PendingChanges, delta_days: float, context: EnvironmentContext) -> None:
+    def process(self, state: WorldState, pending: PendingChanges, 
+                delta_days: float, context: EnvironmentContext) -> None:
+        """Procesa las transiciones relacionales dictadas por la presión social."""
         persons = state.get_all_persons()
-        # El flujo natural de las relaciones
         self._try_form_relationships(persons, pending, state, delta_days, context)
         self._try_marry_couples(persons, pending, state, delta_days, context)
 
-    def _try_form_relationships(self, persons: List[Person], pending: PendingChanges, state: WorldState, delta_days: float, context: EnvironmentContext) -> None:
+    def _try_form_relationships(self, persons: List[Any], pending: PendingChanges, 
+                                state: WorldState, delta_days: float, 
+                                context: EnvironmentContext) -> None:
+        """Lógica de emparejamiento preliminar (noviazgo).
+        
+        Nota de Arquitectura: Si MarriageSystem maneja el emparejamiento inicial, 
+        este bloque puede quedar como hook futuro para dinámicas de amistad pura.
         """
-        SELECCIÓN SEXUAL (Evolución): Aquí es donde el gen 'sociability' brilla.
-        Si un agente tiene baja sociabilidad, le cuesta encontrar pareja. 
-        Sin pareja, no hay reproducción. El gen se extingue.
-        """
-        # Cuando insertes tu lógica de cortejo aquí, asegúrate de aplicar la presión genética.
-        # Ejemplo matemático de evolución:
-        # base_chance = 0.05
-        # courtship_chance = 1.0 - math.exp(-(base_chance * person.genome.sociability) * delta_days)
         pass 
 
-    def _try_marry_couples(self, persons: List[Person], pending: PendingChanges, state: WorldState, delta_days: float, context: EnvironmentContext) -> None:
+    def _try_marry_couples(self, persons: List[Any], pending: PendingChanges, 
+                           state: WorldState, delta_days: float, 
+                           context: EnvironmentContext) -> None:
+        """Convierte relaciones ya establecidas en matrimonios formales."""
+        rel_cfg = self.config.relationships
         processed = set()
         
-        # Parámetros operativos en días 
-        dias_ideal_matrimonio = 8395.0 # ~23 años
-        dias_normalizacion = 365.0 
-
         for p1 in persons:
-            # Filtramos solo a los que están "saliendo" pero no casados
-            if p1.partner_id and p1.marital_status == "soltero":
-                couple_key = tuple(sorted([p1.entity_id, p1.partner_id]))
-                if couple_key in processed: continue
+            if p1.entity_id in pending.deaths:
+                continue
+
+            # Identificamos a los que tienen pareja (noviazgo) pero no están casados
+            partner_id = getattr(p1, 'partner_id', None)
+            if partner_id and getattr(p1, 'marital_status', 'soltero') == "soltero":
+                
+                couple_key = tuple(sorted([p1.entity_id, partner_id]))
+                if couple_key in processed: 
+                    continue
                 processed.add(couple_key)
 
-                p2 = state.get_person_by_id(p1.partner_id)
-                if not p2 or p2.marital_status == "casado": continue
+                p2 = state.get_person_by_id(partner_id)
+                if not p2 or getattr(p2, 'marital_status', '') == "casado" or p2.entity_id in pending.deaths: 
+                    continue
 
                 # 1. SELECCIÓN DE ESTABILIDAD (Temperamento)
-                # Agentes con mal temperamento (< 1.0) reducen la estabilidad de la pareja, 
-                # retrasando el matrimonio.
+                # Temperamentos bajos reducen la estabilidad y retrasan la formalización.
                 stability_score = max(0.1, 1.0 - ((p1.genome.temperament + p2.genome.temperament) / 2.0))
                 
-                # Todo operando sobre la variable `age` purificada (días)
+                # 2. PRESIÓN DEMOGRÁFICA (Edad)
                 avg_age_days = (p1.age + p2.age) / 2.0
-                age_pressure = max(0.0, (avg_age_days - dias_ideal_matrimonio) / dias_normalizacion)
+                age_pressure = max(0.0, (avg_age_days - rel_cfg.ideal_marriage_age_days) / 365.0)
                 
-                # 2. SELECCIÓN SEXUAL (Sociabilidad)
-                # Agentes altamente sociables se casan más rápido, accediendo antes a la reproducción.
+                # 3. SELECCIÓN SEXUAL (Sociabilidad)
                 social_trait_pressure = (p1.genome.sociability + p2.genome.sociability) / 2.0
                 
-                pressure = 0.0
-                if hasattr(context, 'get_local_pressure'):
-                    pressure = context.get_local_pressure(p1.x, p1.y)
+                # 4. PRESIÓN DEL ENTORNO LOCAL
+                pressure = context.get_local_pressure(p1.x, p1.y)
                 
+                # Fórmula de estrés relacional
                 total_social_pressure = (age_pressure * 0.4) + (social_trait_pressure * 0.3) + (min(2.0, pressure) * 0.3)
 
-                # Cálculo temporal puro con presión evolutiva integrada
-                final_daily_rate = self.daily_base_rate * stability_score * (1.0 + total_social_pressure)
+                # Cálculo temporal de la tasa diaria
+                final_daily_rate = rel_cfg.daily_marriage_rate * stability_score * (1.0 + total_social_pressure)
                 
-                # Probabilidad exacta acumulada en el periodo delta_days
+                # Probabilidad exacta acumulada
                 marriage_chance = 1.0 - math.exp(-final_daily_rate * delta_days)
                 
                 if random.random() < marriage_chance:
