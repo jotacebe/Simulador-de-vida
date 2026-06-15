@@ -21,8 +21,7 @@ class AgingSystem:
         """Añade el tiempo transcurrido a la edad biológica de los agentes vivos."""
         
         for person in state.get_all_persons():
-            # Filtro de integridad referencial: omitimos a los individuos que 
-            # ya han sido marcados como fallecidos en este mismo tick temporal.
+            # Filtro de integridad referencial
             if person.entity_id in pending.deaths:
                 continue
             
@@ -30,5 +29,5 @@ class AgingSystem:
             # es una asignación directa del avance del reloj del motor.
             increment = delta_days
             
-            # Registramos la mutación de estado de forma segura en el búfer transaccional.
+            # Registramos la mutación de estado de forma segura
             pending.register_age_increment(person.entity_id, increment)

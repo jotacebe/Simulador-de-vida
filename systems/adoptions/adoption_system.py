@@ -6,22 +6,31 @@ from core.state.world_state import WorldState
 from core.state.pending_changes import PendingChanges
 from entities.person.person import Person
 from systems.environment.environment_context import EnvironmentContext
+from core.config.simulation_config import SimulationConfig
 
 class AdoptionSystem:
     """Identifica huérfanos y asigna familias mediante un proceso transaccional."""
 
-    def __init__(self, config) -> None:
-        """Inicializa el sistema vinculándolo a la configuración centralizada."""
+    def __init__(self, config: SimulationConfig) -> None:
+        """Inicializa el sistema vinculándolo a la configuración centralizada.
+        
+        Args:
+            config (SimulationConfig): Configuración maestra de la simulación.
+        """
         self.config = config
         self.logger = logging.getLogger("AdoptionSystem")
-        # Se han eliminado los fallbacks internos; la fuente de verdad es self.config.adoptions
 
     def process(self, state: WorldState, pending: PendingChanges, 
                 delta_days: float, context: EnvironmentContext) -> None:
-        """Ejecuta el ciclo de adopciones operando estrictamente en días de vida."""
+        """Ejecuta el ciclo de adopciones operando estrictamente en días de vida.
         
+        Args:
+            state (WorldState): Estado centralizado del mundo.
+            pending (PendingChanges): Búfer transaccional de mutaciones.
+            delta_days (float): Paso de tiempo en días.
+            context (EnvironmentContext): Contexto espacial y medioambiental.
+        """
         # 1. ACCESO A CONFIGURACIÓN CENTRALIZADA
-        # Extraemos directamente el objeto tipado, eliminando comprobaciones de diccionarios
         adoptions_cfg = self.config.adoptions
         all_persons = state.get_all_persons()
 
@@ -51,18 +60,24 @@ class AdoptionSystem:
         seen_couples: Set[int] = set() 
 
         for person in all_persons:
-            # Omitimos fallecidos y cónyuges de familias ya procesadas (evita duplicar la candidatura de la pareja)
+            # Omitimos fallecidos y cónyuges de familias ya procesadas
             if person.entity_id in pending.deaths or person.entity_id in seen_couples: 
                 continue
             
-            # Criterios de elegibilidad: edad mínima cumplida, matrimonio activo y capacidad familiar
-            is_old_enough = person.age >= adoptions_cfg.min_adoptive_age_days
-            is_married = person.marital_status == "casado" and person.partner_id is not None
+            # Extraemos el ID explícitamente para garantizar el tipado seguro (Optional[int])
+            partner_id = person.partner_id
             
-            # Si cumplen los requisitos sociales y tienen menos de 3 hijos, entran en la bolsa
-            if is_old_enough and is_married and person.children_count < 3:
+            # Criterios de elegibilidad: edad mínima cumplida y matrimonio activo
+            is_old_enough = person.age >= adoptions_cfg.min_adoptive_age_days
+            is_married = person.marital_status == "casado" and partner_id is not None
+            
+            # Comprobación de capacidad familiar dinámica mediante configuración
+            if is_old_enough and is_married and person.children_count < adoptions_cfg.max_children_for_adoption:
                 eligible_parents.append(person)
-                seen_couples.add(person.partner_id)
+                
+                # Validación de tipado: Aseguramos que no es None antes de añadir al Set[int]
+                if partner_id is not None:
+                    seen_couples.add(partner_id)
 
         if not eligible_parents:
             return
@@ -73,15 +88,13 @@ class AdoptionSystem:
 
         # 5. PROCESO DE ADOPCIÓN TRANSACCIONAL
         for orphan in orphans:
-            # Si nos quedamos sin familias de acogida, detenemos las asignaciones de este tick
             if not eligible_parents:
                 break 
             
-            # Seleccionamos a la familia más idónea (la primera de la lista ordenada)
             new_parent = eligible_parents[0]
             new_partner = state.get_person_by_id(new_parent.partner_id) if new_parent.partner_id else None
 
-            # Registramos la mutación social de forma segura en el búfer transaccional
+            # Registramos la mutación social
             pending.register_adoption(
                 child_id=orphan.entity_id,
                 parent_a=new_parent.entity_id,
@@ -91,7 +104,7 @@ class AdoptionSystem:
             # Movemos físicamente al menor a las coordenadas de su nuevo hogar
             pending.register_movement(orphan.entity_id, new_parent.x, new_parent.y)
             
-            # Retiramos a la familia de la bolsa (límite de 1 adopción por familia por tick)
+            # Retiramos a la familia de la bolsa
             eligible_parents.pop(0)
 
             self.logger.info(f"Adopción registrada: Menor {orphan.entity_id} asignado a familia {new_parent.entity_id}")

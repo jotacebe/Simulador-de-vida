@@ -23,29 +23,22 @@ class DiseaseSystem:
         Calcula las probabilidades de infección y cura utilizando tasas diarias
         continuas y aplicando presión selectiva según el gen de inmunidad.
         """
-        # Acceso directo al objeto de configuración tipado, eliminando diccionarios
         dis_cfg = self.config.diseases
+        time_cfg = self.config.time
         
-        # Transformación de las probabilidades base (asumidas mensuales) a tasas diarias
-        # Esto estandariza la unidad de medida temporal para el modelo exponencial
-        base_transmission_rate = dis_cfg.base_transmission_chance / 30.0
-        base_recovery_rate = dis_cfg.base_recovery_chance / 30.0
+        # Transformación de las probabilidades base a tasas diarias usando config
+        base_transmission_rate = dis_cfg.base_transmission_chance / time_cfg.days_per_month
+        base_recovery_rate = dis_cfg.base_recovery_chance / time_cfg.days_per_month
 
         for person in state.get_all_persons():
-            # Filtro de contingencia: omitimos entidades ya marcadas como fallecidas
             if person.entity_id in pending.deaths:
                 continue
 
-            # Extracción del rasgo genético para aplicar presión selectiva
             immunity = person.genome.immunity
 
             if getattr(person, 'is_sick', False):
                 # 1. SELECCIÓN NATURAL (Recuperación)
-                # A mayor inmunidad genética, mayor es la tasa diaria de recuperación
                 daily_recovery_rate = base_recovery_rate * immunity
-                
-                # Fórmula de Poisson/Exponencial para probabilidades acumuladas en tiempo continuo.
-                # Protege al sistema de errores matemáticos en ticks parciales o variables.
                 total_recovery_chance = 1.0 - math.exp(-daily_recovery_rate * delta_days)
 
                 if random.random() < total_recovery_chance:
@@ -53,11 +46,8 @@ class DiseaseSystem:
             
             else:
                 # 2. SELECCIÓN NATURAL (Contagio)
-                # La tasa de contagio es inversamente proporcional a la inmunidad.
-                # Se aplica un clamping inferior (0.1) para evitar la división por cero.
-                daily_contagion_rate = base_transmission_rate / max(0.1, immunity)
-                
-                # Integración temporal del riesgo de exposición
+                # Aplicamos el clamping dinámico desde la configuración
+                daily_contagion_rate = base_transmission_rate / max(dis_cfg.immunity_clamping, immunity)
                 total_contagion_chance = 1.0 - math.exp(-daily_contagion_rate * delta_days)
                 
                 if random.random() < total_contagion_chance:

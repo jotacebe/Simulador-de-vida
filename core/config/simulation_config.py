@@ -8,15 +8,18 @@ límites biológicos del motor, garantizando la consistencia temporal y matemát
 import logging
 from typing import Any, Optional
 
-# =============================================================================
-# DEFINICIÓN DE SUBSISTEMAS DE CONFIGURACIÓN
-# =============================================================================
+class EngineConfig:
+    """Parámetros de ejecución del bucle principal."""
+    def __init__(self) -> None:
+        self.total_days: float = 365.0
+        self.delta_days: float = 1.0
 
 class AdoptionsConfig:
     """Umbrales biológicos y legales para el sistema de adopciones."""
     def __init__(self) -> None:
-        self.max_orphan_age_days: float = 6205.0   # 17 años
-        self.min_adoptive_age_days: float = 9125.0 # 25 años
+        self.max_orphan_age_days: float = 6205.0   
+        self.min_adoptive_age_days: float = 9125.0 
+        self.max_children_for_adoption: int = 3    # Límite familiar máximo
 
 class CognitionConfig:
     """Parámetros de memoria, trauma y psicología de los agentes."""
@@ -25,6 +28,10 @@ class CognitionConfig:
         self.overcrowding_threshold: float = 1.3
         self.overcrowding_impact: float = 0.1
         self.sickness_impact: float = 0.15
+        
+        # Variables añadidas para eliminar el hardcoding del código fuente
+        self.temperament_modifier: float = 0.5     # Modificador de retención de memoria
+        self.max_trauma_cap: float = 1.0           # Umbral máximo permitido de trauma
 
 class ReproductionConfig:
     """Límites, ventanas de fertilidad y probabilidades de reproducción."""
@@ -34,17 +41,16 @@ class ReproductionConfig:
         self.pregnancy_duration_days: float = 270.0
         self.mutation_factor: float = 0.05
         self.min_genome_value: float = 0.01
-        
-        # Sincronizado con los nuevos sistemas continuos (Poisson)
-        self.min_fertility_age_days: float = 6570.0   # 18 años
-        self.max_fertility_age_days: float = 16425.0  # 45 años
-        self.daily_birth_rate: float = 0.0033         # ~10% de probabilidad al mes
-        self.base_conception_chance: float = 0.15     # Probabilidad base anual (corregida duplicidad)
+        self.min_fertility_age_days: float = 6570.0   
+        self.max_fertility_age_days: float = 16425.0  
+        self.daily_birth_rate: float = 0.0033         
+        self.base_conception_chance: float = 0.15     
 
 class MovementConfig:
     """Parámetros de desplazamiento espacial."""
     def __init__(self) -> None:
-        self.base_speed: float = 0.5  # Casillas recorridas por día biológico
+        self.base_speed: float = 0.5  
+        self.proximity_threshold: float = 0.1  
 
 class DiseasesConfig:
     """Parámetros de propagación y comportamiento epidemiológico."""
@@ -55,6 +61,7 @@ class DiseasesConfig:
         self.base_lethality_rate: float = 0.06
         self.transmission_radius: int = 2
         self.environmental_transmission_rate: float = 0.15
+        self.immunity_clamping: float = 0.1  # Límite inferior de seguridad matemática
 
 class EvolutionConfig:
     """Parámetros para la analítica macroevolutiva y recolección de métricas."""
@@ -82,23 +89,20 @@ class MortalityConfig:
         self.base_life_expectancy_days: float = 25550.0
         self.infant_threshold_days: float = 1095.0
         self.infant_mortality_rate: float = 0.02
-        self.hard_cap_age_days: float = 41975.0 # Límite biológico absoluto
+        self.hard_cap_age_days: float = 41975.0 
         self.density_penalty_threshold: float = 1.2
         self.density_penalty_multiplier: float = 1.5
         self.alpha_base: float = 0.0001
         self.beta_base: float = 0.08
         self.sickness_penalty_multiplier: float = 2.5
         self.min_sickness_penalty: float = 1.1
+        self.genome_clamping: float = 0.01  # Límite inferior de seguridad matemática
 
 class RelationshipsConfig:
-    """Parámetros de cortejo, emparejamiento, noviazgo y selección sexual.
-    
-    NOTA: Se ha mantenido unificado bajo el concepto 'relationships' para evitar
-    la colisión de variables que existía previamente con 'MarriageConfig'.
-    """
+    """Parámetros de cortejo, emparejamiento, noviazgo y selección sexual."""
     def __init__(self) -> None:
-        self.min_marriage_age_days: float = 6570.0    # 18 años
-        self.ideal_marriage_age_days: float = 8395.0  # 23 años
+        self.min_marriage_age_days: float = 6570.0    
+        self.ideal_marriage_age_days: float = 8395.0  
         self.courtship_radius: int = 20
         self.base_marriage_chance: float = 0.01
         self.daily_marriage_rate: float = 0.00137
@@ -116,22 +120,20 @@ class EnvironmentConfig:
 class TimeConfig:
     """Parámetros para la progresión temporal macroscópica y ciclos vitales."""
     def __init__(self) -> None:
-        self.adult_age_days: float = 6570.0   # 18 años biológicos
-        self.senior_age_days: float = 21900.0 # 60 años biológicos
+        self.adult_age_days: float = 6570.0   
+        self.senior_age_days: float = 21900.0 
+        self.days_per_month: float = 30.0    # Escalas de conversión temporal
+        self.days_per_year: float = 365.0    
 
 class GenealogyConfig:
     """Parámetros de rastreo histórico y restricciones de parentesco."""
     def __init__(self) -> None:
-        self.consanguinity_limit: int = 3  # Grado de parentesco prohibido para matrimonio
+        self.consanguinity_limit: int = 3  
 
 class MetricsConfig:
     """Parámetros para la recolección de métricas poblacionales."""
     def __init__(self) -> None:
         self.snapshot_interval_days: float = 1.0 
-
-# =============================================================================
-# CONFIGURACIÓN MAESTRA
-# =============================================================================
 
 class SimulationConfig:
     """Configuración maestra que agrupa y expone todos los subsistemas."""
@@ -139,7 +141,7 @@ class SimulationConfig:
     def __init__(self) -> None:
         self.logger = logging.getLogger("SimulationConfig")
         
-        # Inicialización única de subsistemas (Duplicidad eliminada)
+        self.engine = EngineConfig()
         self.time = TimeConfig()
         self.reproduction = ReproductionConfig()
         self.diseases = DiseasesConfig()
@@ -155,7 +157,6 @@ class SimulationConfig:
         self.relationships = RelationshipsConfig()
 
     def set_parameter(self, category: str, key: str, value: Any) -> bool:
-        """Modifica un valor mediante reflexión. Permite la mutación en runtime."""
         target_obj = getattr(self, category, None)
         if not target_obj or not hasattr(target_obj, key):
             self.logger.warning(f"[CONFIG] Error: No existe la propiedad {category}.{key}")
@@ -167,10 +168,8 @@ class SimulationConfig:
         return True
 
     def get_parameter(self, category: str, key: str, default: Any = None) -> Any:
-        """Obtiene un parámetro de forma verdaderamente segura evitando caídas del motor."""
         target_obj = getattr(self, category, None)
         if not target_obj:
             self.logger.error(f"[CONFIG] Categoría '{category}' no encontrada en el sistema.")
             return default
-            
         return getattr(target_obj, key, default)

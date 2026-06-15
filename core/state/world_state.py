@@ -97,11 +97,13 @@ class WorldState:
             new_id = self.get_next_entity_id()
             baby_genome = data.get("genome")
             
+            # Instanciamos inyectando la configuración central
             newborn = Person(
+                config=self.config,
                 entity_id=new_id, 
-                age=0.0, 
                 x=data["x"], 
                 y=data["y"], 
+                age=0.0, 
                 genome=baby_genome
             )
             

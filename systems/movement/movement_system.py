@@ -1,4 +1,4 @@
-"""Módulo responsable del cálculo de desplazamientos hacia anclajes sociales."""
+"""Módulo responsable del cálculo de desplazamientos en la cuadrícula espacial."""
 
 import math
 import logging
@@ -12,7 +12,13 @@ class MovementSystem:
     """Calcula vectores de movimiento aplicando matemáticas de tiempo continuo."""
 
     def __init__(self, config: SimulationConfig, density_system: Any, relationship_system: Any) -> None:
-        """Inicializa el sistema vinculándolo a la configuración central y dependencias."""
+        """Inicializa el sistema vinculándolo a la configuración central y dependencias.
+        
+        Args:
+            config (SimulationConfig): Configuración maestra.
+            density_system (Any): Sistema para consultas de densidad.
+            relationship_system (Any): Sistema para obtener anclajes sociales (parejas).
+        """
         self.config = config
         self.density_system = density_system
         self.relationship_system = relationship_system
@@ -20,21 +26,40 @@ class MovementSystem:
 
     def process(self, state: WorldState, pending: PendingChanges, 
                 delta_days: float, context: EnvironmentContext) -> None:
-        """Calcula el desplazamiento acumulado para el periodo delta_days."""
+        """Calcula el desplazamiento acumulado para el periodo delta_days.
+        
+        Cumple estrictamente con las reglas físicas del motor:
+        1. No mueve muertos.
+        2. Respeta límites del mapa (clamping).
+        3. Limita el desplazamiento a la velocidad máxima.
+        """
         
         move_cfg = self.config.movement
         
-        # Distancia total máxima que el agente puede recorrer en este tick continuo
+        # Distancia total máxima que el agente puede recorrer en este tick
         distance_capacity = move_cfg.base_speed * delta_days
         
+        # Pre-calculamos los límites físicos del mapa para la restricción (0 a width-1)
+        # Asumiendo que state.width y state.height están definidos en WorldState
+        max_x = state.width - 1
+        max_y = state.height - 1
+        
         for person in state.get_all_persons():
-            # Filtro de integridad
+            # ==========================================
+            # 1. NUNCA MUEVE INDIVIDUOS MUERTOS
+            # ==========================================
+            # Filtro de integridad: no procesamos entidades fallecidas en este tick.
+            # (Las muertas en ticks anteriores ya no están en state.get_all_persons).
             if person.entity_id in pending.deaths:
                 continue
 
-            # Buscamos el anclaje dictaminado por la red social
+            # ==========================================
+            # 2. SELECCIÓN DE OBJETIVO (SOCIAL)
+            # ==========================================
             target = self.relationship_system.get_social_anchor(person, state)
-            if target is None:
+            
+            # Si no tiene anclaje social, o el anclaje acaba de morir, se queda quieto
+            if target is None or target.entity_id in pending.deaths:
                 continue
 
             # Vector direccional hacia el objetivo
@@ -42,16 +67,30 @@ class MovementSystem:
             dy = target.y - person.y
             dist = math.sqrt(dx**2 + dy**2)
 
-            # Optimización: Umbral de tolerancia de proximidad
-            if dist < 0.1:
+            # Optimización: Umbral de tolerancia de proximidad para evitar oscilaciones (jitter)
+            if dist < move_cfg.proximity_threshold:
                 continue
 
-            # Normalizamos el vector y aplicamos la magnitud de desplazamiento
+            # ==========================================
+            # 3. RESPETO A LA VELOCIDAD
+            # ==========================================
+            # Normalizamos el vector y aplicamos la magnitud estricta permitida
             move_amount = min(dist, distance_capacity)
             ratio = move_amount / dist
             
             new_x = person.x + (dx * ratio)
             new_y = person.y + (dy * ratio)
 
-            # Registramos el desplazamiento redondeado para asegurar alineación a la cuadrícula
-            pending.register_movement(person.entity_id, round(new_x), round(new_y))
+            # Redondeo algebraico a la cuadrícula discreta
+            grid_x = round(new_x)
+            grid_y = round(new_y)
+
+            # ==========================================
+            # 4. LÍMITES DEL MAPA (CLAMPING)
+            # ==========================================
+            # Garantiza matemáticamente que las coordenadas jamás saldrán de los bordes
+            final_x = max(0, min(grid_x, max_x))
+            final_y = max(0, min(grid_y, max_y))
+
+            # Registramos el movimiento validado
+            pending.register_movement(person.entity_id, final_x, final_y)
