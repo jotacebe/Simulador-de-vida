@@ -1,69 +1,226 @@
-"""Motor central de la simulación.
+"""Motor temporal principal de la simulación.
 
-Ruta: core/engine/simulation_engine.py
-
-Responsabilidad: Controlar el bucle principal de tiempo, instanciar el contexto
-transaccional en cada iteración (tick), ejecutar secuencialmente todos los
-sistemas inyectados y delegar la consolidación atómica en el WorldState.
+``SimulationEngine`` contiene el bucle principal. El motor avanza ticks,
+solicita al pipeline que ejecute las fases activas y consolida los cambios en
+``WorldState``.
 """
 
+from __future__ import annotations
+
+import json
 import logging
 import math
-from typing import List, Any, Optional
+import os
+import random
+from typing import Any, Optional
 
-from core.state.world_state import WorldState
-from core.state.pending_changes import PendingChanges
-from systems.environment.environment_context import EnvironmentContext
 from core.config.simulation_config import SimulationConfig
+from core.engine.phase_scheduler import PhaseScheduler
+from core.execution.execution_pipeline import ExecutionPipeline
+from core.state.world_state import WorldState
+from entities.person.genome import Genome
+from entities.person.person import Person
 
 
 class SimulationEngine:
-    """Ejecuta el pipeline de sistemas biológicos y sociales sobre el estado del mundo."""
+    """Controla el ciclo temporal completo de la simulación."""
 
-    def __init__(self, world_state: WorldState, systems: List[Any], config: SimulationConfig, event_bus: Optional[Any] = None) -> None:
-        """Inicializa el motor con el estado centralizado y la lista de sistemas.
+    def __init__(
+        self,
+        world_state: WorldState,
+        config: SimulationConfig,
+        pipeline: ExecutionPipeline,
+        event_bus: Any = None,
+    ) -> None:
+        """Inicializa el motor.
 
         Args:
-            world_state (WorldState): Fuente de verdad de las entidades de la simulación.
-            systems (List[Any]): Lista de sistemas ordenados topológicamente.
-            config (SimulationConfig): Configuración centralizada de la simulación.
-            event_bus (Optional[Any]): Bus de eventos para la notificación de cambios.
+            world_state: Estado autoritativo del mundo.
+            config: Configuración compartida de la simulación.
+            pipeline: Pipeline responsable de ejecutar los sistemas por tick.
+            event_bus: Bus de eventos opcional para publicar cambios.
         """
+
         self.state = world_state
-        self.systems = systems
         self.config = config
+        self.pipeline = pipeline
         self.event_bus = event_bus
-        self.logger = logging.getLogger("SimulationEngine")
+        self.logger = logging.getLogger(self.__class__.__name__)
+
+    @classmethod
+    def create_default(
+        cls,
+        config_path: Optional[str] = None,
+        width: int = 100,
+        height: int = 100,
+        founding_population_size: int = 50,
+        event_bus: Any = None,
+    ) -> "SimulationEngine":
+        """Crea un motor completo usando la configuración por defecto.
+
+        Args:
+            config_path: Archivo JSON opcional con sobrescrituras de
+                configuración.
+            width: Anchura del mundo.
+            height: Altura del mundo.
+            founding_population_size: Número de agentes fundadores.
+            event_bus: Bus de eventos opcional.
+
+        Returns:
+            Instancia de ``SimulationEngine`` lista para ejecutarse.
+        """
+
+        config = SimulationConfig()
+
+        if config_path:
+            cls._load_external_config(config, config_path)
+
+        state = WorldState(config=config, width=width, height=height)
+        cls._generate_founding_population(
+            config=config,
+            state=state,
+            size=founding_population_size,
+        )
+
+        scheduler = PhaseScheduler(config)
+        pipeline = ExecutionPipeline(
+            config=config,
+            phases=scheduler.build_phases(),
+        )
+
+        return cls(
+            world_state=state,
+            config=config,
+            pipeline=pipeline,
+            event_bus=event_bus,
+        )
 
     def run(self) -> None:
-        """Ejecuta el bucle principal de la simulación (fase transaccional por tick)."""
-        total_days = self.config.engine.total_days
-        delta_days = self.config.engine.delta_days
+        """Ejecuta la simulación hasta alcanzar la duración configurada.
 
-        self.logger.info(f"🚀 Iniciando bucle de simulación: {total_days} días ({delta_days} días/tick).")
-        
-        current_day = 0.0
+        Raises:
+            ValueError: Si ``engine.delta_days`` no es mayor que cero.
+            Exception: Propaga fallos del pipeline o del commit para evitar
+                confirmar ticks corruptos.
+        """
+
+        total_days = float(self.config.engine.total_days)
+        delta_days = float(self.config.engine.delta_days)
+
+        if delta_days <= 0:
+            raise ValueError("engine.delta_days debe ser mayor que cero.")
+
         total_ticks = math.ceil(total_days / delta_days)
-        
-        for tick in range(1, total_ticks + 1):
-            current_day += delta_days
-            self.logger.debug(f"--- Tick {tick}/{total_ticks} | Día {current_day:.2f} ---")
-            
-            # 1. Instanciación del buffer limpio y el contexto espacial real
-            pending = PendingChanges()
-            context = EnvironmentContext(state=self.state)
-            
-            # 2. Pipeline transaccional: Los sistemas acumulan intenciones de cambio
-            for system in self.systems:
-                try:
-                    system.process(self.state, pending, delta_days, context)
-                except Exception as e:
-                    self.logger.error(
-                        f"Fallo crítico en {system.__class__.__name__} durante el tick {tick}: {e}"
-                    )
-                    raise  # Fail-fast para evitar la corrupción del estado global
 
-            # 3. Fase de Consolidación Atómica utilizando la API nativa de WorldState
-            self.state.apply_commit(pending, event_bus=self.event_bus, current_tick=tick)
-            
-        self.logger.info("🏁 Simulación finalizada con éxito.")
+        self.logger.info(
+            "Iniciando simulación: %s días, %s días/tick, %s ticks.",
+            total_days,
+            delta_days,
+            total_ticks,
+        )
+
+        for tick in range(1, total_ticks + 1):
+            current_day = min(tick * delta_days, total_days)
+
+            self.logger.debug(
+                "Ejecutando tick %s/%s en el día %.2f.",
+                tick,
+                total_ticks,
+                current_day,
+            )
+
+            pending = self.pipeline.execute_tick(
+                state=self.state,
+                delta_days=delta_days,
+                current_tick=tick,
+                current_day=current_day,
+                event_bus=self.event_bus,
+            )
+
+            self.state.apply_commit(
+                pending,
+                event_bus=self.event_bus,
+                current_tick=tick,
+            )
+
+            if hasattr(self.state, "world_days_elapsed"):
+                self.state.world_days_elapsed = current_day
+
+        self.logger.info("Simulación finalizada correctamente.")
+
+    @staticmethod
+    def _load_external_config(
+        config: SimulationConfig,
+        filepath: str,
+    ) -> None:
+        """Carga sobrescrituras de configuración desde un JSON externo.
+
+        Args:
+            config: Configuración que recibirá los cambios.
+            filepath: Ruta al archivo JSON.
+
+        Raises:
+            json.JSONDecodeError: Si el archivo no contiene JSON válido.
+            OSError: Si el archivo no se puede leer.
+        """
+
+        logger = logging.getLogger("SimulationEngine")
+
+        if not os.path.exists(filepath):
+            logger.warning("Archivo de configuración no encontrado: %s.", filepath)
+            return
+
+        with open(filepath, "r", encoding="utf-8") as file:
+            data = json.load(file)
+
+        for category, params in data.items():
+            if not isinstance(params, dict):
+                logger.warning(
+                    "Se ignora una sección de configuración inválida: %s.",
+                    category,
+                )
+                continue
+
+            for key, value in params.items():
+                config.set_parameter(category, key, value)
+
+    @staticmethod
+    def _generate_founding_population(
+        config: SimulationConfig,
+        state: WorldState,
+        size: int,
+    ) -> None:
+        """Crea la población inicial de la simulación.
+
+        Args:
+            config: Configuración compartida de la simulación.
+            state: Estado del mundo donde se insertarán los agentes.
+            size: Número de agentes fundadores.
+        """
+
+        logger = logging.getLogger("SimulationEngine")
+        logger.info("Generando %s agentes fundadores.", size)
+
+        for entity_id in range(1, size + 1):
+            genome = Genome()
+            genome.fertility = random.uniform(0.5, 0.9)
+            genome.sociability = random.uniform(0.1, 0.9)
+            genome.temperament = random.uniform(0.1, 0.9)
+            genome.immunity = random.uniform(0.4, 0.8)
+
+            person = Person(
+                config=config,
+                entity_id=entity_id,
+                x=random.randint(10, 90),
+                y=random.randint(10, 90),
+                age=random.uniform(6500.0, 11000.0),
+                genome=genome,
+            )
+
+            person.set_health_state("sano")
+            person.update_pregnancy(False, 0.0)
+
+            partner_id = entity_id + 1 if entity_id % 2 else entity_id - 1
+            person.register_marriage(partner_id)
+
+            state.add_person(person)

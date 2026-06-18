@@ -19,3 +19,4 @@ def exportar_proyecto(archivo_salida="todo_el_proyecto.txt", extensiones=(".py",
 if __name__ == "__main__":
     exportar_proyecto()
     print("Exportación completada: todo_el_proyecto.txt")
+

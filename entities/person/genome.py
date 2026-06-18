@@ -1,90 +1,118 @@
-"""Módulo que define la genética y herencia de las entidades del simulador."""
+"""Módulo que define la genética y herencia mendeliana de las entidades.
+
+Responsabilidad:
+Actuar como el contenedor del genotipo diploide de un individuo.
+Define la recombinación por segregación independiente y mutación puntual.
+"""
 
 import random
+import logging
+from typing import Optional
+from .allele import Allele, Gene
 
 class Genome:
-    """Representa el conjunto de rasgos genéticos de una entidad y su evolución."""
+    """Conjunto de pares de alelos que determinan los rasgos de una entidad.
+    
+    Implementa un sistema mendeliano puro con dominancia y recesividad,
+    erradicando la pérdida de varianza (convergencia a la media).
+    """
 
-    def __init__(self, longevity: float = 1.0, sociability: float = 1.0, 
-                 temperament: float = 1.0, fertility: float = 1.0, 
-                 immunity: float = 1.0):
-        """Inicializa un nuevo genoma con valores biológicos base."""
-        self._longevity = longevity
-        self._sociability = sociability
-        self._temperament = temperament
-        self._fertility = fertility
-        self._immunity = immunity
+    def __init__(self, 
+                 longevity: Optional[Gene] = None, 
+                 sociability: Optional[Gene] = None, 
+                 temperament: Optional[Gene] = None, 
+                 fertility: Optional[Gene] = None, 
+                 immunity: Optional[Gene] = None,
+                 species_baseline: str = "human"):
+        """Inicializa el genoma, generando genes fundadores si no se proveen."""
+        
+        self._species_baseline = species_baseline
+        self.logger = logging.getLogger(self.__class__.__name__)
+
+        # Si no se proveen genes, creamos homocigotos aleatorios (Generación 0)
+        self._genes = {
+            "longevity": longevity or self._create_founder_gene(1.0),
+            "sociability": sociability or self._create_founder_gene(1.0),
+            "temperament": temperament or self._create_founder_gene(1.0),
+            "fertility": fertility or self._create_founder_gene(1.0),
+            "immunity": immunity or self._create_founder_gene(1.0),
+        }
+
+    def _create_founder_gene(self, base_val: float) -> Gene:
+        """Crea un gen inicial aplicando una ligera diversidad a la especie base."""
+        return Gene(
+            allele_a=Allele.create_random(base_val, 0.1),
+            allele_b=Allele.create_random(base_val, 0.1)
+        )
+
+    # ==========================================
+    # PROPERTIES FENOTÍPICAS (Interfaz retrocompatible)
+    # ==========================================
+    # Los sistemas leerán estas propiedades creyendo que son flotantes estáticos,
+    # pero bajo el capó están llamando a la expresión de dominancia genética.
 
     @property
-    def longevity(self) -> float:
-        """Devuelve el factor de longevidad de la entidad."""
-        return self._longevity
+    def longevity(self) -> float: return self._genes["longevity"].express()
     
-    @longevity.setter
-    def longevity(self, value: float) -> None:
-        """Establece el factor de longevidad de la entidad."""
-        self._longevity = value
+    @property
+    def sociability(self) -> float: return self._genes["sociability"].express()
+    
+    @property
+    def temperament(self) -> float: return self._genes["temperament"].express()
+    
+    @property
+    def fertility(self) -> float: return self._genes["fertility"].express()
+    
+    @property
+    def immunity(self) -> float: return self._genes["immunity"].express()
 
     @property
-    def sociability(self) -> float:
-        """Devuelve el factor de sociabilidad de la entidad."""
-        return self._sociability
-    
-    @sociability.setter
-    def sociability(self, value: float) -> None:
-        """Establece el factor de sociabilidad de la entidad."""
-        self._sociability = value
+    def species_baseline(self) -> str: return self._species_baseline
 
-    @property
-    def temperament(self) -> float:
-        """Devuelve el factor de temperamento de la entidad."""
-        return self._temperament
-    
-    @temperament.setter
-    def temperament(self, value: float) -> None:
-        """Establece el factor de temperamento de la entidad."""
-        self._temperament = value
+    # ==========================================
+    # MOTOR DE HERENCIA MENDELIANA
+    # ==========================================
+    def combine(self, other_genome: Optional['Genome']) -> 'Genome':
+        """Cruza este genotipo con el de una pareja mediante meiosis.
 
-    @property
-    def fertility(self) -> float:
-        """Devuelve el factor de fertilidad de la entidad."""
-        return self._fertility
-    
-    @fertility.setter
-    def fertility(self, value: float) -> None:
-        """Establece el factor de fertilidad de la entidad."""
-        self._fertility = value
-
-    @property
-    def immunity(self) -> float:
-        """Devuelve el factor de inmunidad de la entidad."""
-        return self._immunity
-    
-    @immunity.setter
-    def immunity(self, value: float) -> None:
-        """Establece el factor de inmunidad de la entidad."""
-        self._immunity = value
-
-    def combine(self, other_genome: 'Genome') -> 'Genome':
-        """Combina este genoma con otro para generar un nuevo descendiente.
-
-        Aplica herencia por promedio, añade deriva genética mediante mutación
-        y restringe los valores resultantes dentro de los límites biológicos.
+        Args:
+            other_genome: Genoma del progenitor masculino (puede ser None para partenogénesis).
+            
+        Returns:
+            Un nuevo Genome recombinado.
         """
-        def get_inherited_value(v1: float, v2: float) -> float:
-            # 1. Herencia (Promedio de los padres)
-            base = (v1 + v2) / 2.0
-            
-            # 2. Mutación (Deriva genética: +/- 2% de variabilidad)
-            mutation = random.uniform(-0.02, 0.02)
-            
-            # 3. Resultado (Clamping: mantenemos el valor en rangos biológicos 0.5 - 1.5)
-            return max(0.5, min(1.5, base + mutation))
+        # Partenogénesis: Si no hay padre, la madre aporta ambos alelos (clonación con mutación)
+        if other_genome is None:
+            other_genome = self
+
+        if self._species_baseline != other_genome.species_baseline:
+            self.logger.warning("Cruce interespecie. El híbrido heredará la línea materna.")
+
+        new_genes = {}
+        mutation_rate = 0.05 # Probabilidad de mutación cósmica severa
+
+        # Para cada locus genético, extraemos un alelo de cada padre
+        for trait_name in self._genes.keys():
+            mother_gene = self._genes[trait_name]
+            father_gene = other_genome._genes[trait_name]
+
+            # Meiosis: Un alelo de la madre y uno del padre
+            allele_m = mother_gene.meiosis()
+            allele_f = father_gene.meiosis()
+
+            # Mutación puntual (Deriva genética)
+            if random.random() < mutation_rate:
+                allele_m = Allele.create_random(allele_m.value, 0.15)
+            if random.random() < mutation_rate:
+                allele_f = Allele.create_random(allele_f.value, 0.15)
+
+            new_genes[trait_name] = Gene(allele_m, allele_f)
 
         return Genome(
-            longevity=get_inherited_value(self.longevity, other_genome.longevity),
-            sociability=get_inherited_value(self.sociability, other_genome.sociability),
-            temperament=get_inherited_value(self.temperament, other_genome.temperament),
-            fertility=get_inherited_value(self.fertility, other_genome.fertility),
-            immunity=get_inherited_value(self.immunity, other_genome.immunity)
+            longevity=new_genes["longevity"],
+            sociability=new_genes["sociability"],
+            temperament=new_genes["temperament"],
+            fertility=new_genes["fertility"],
+            immunity=new_genes["immunity"],
+            species_baseline=self._species_baseline
         )

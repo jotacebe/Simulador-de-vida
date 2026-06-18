@@ -1,18 +1,19 @@
 """Módulo de Estado Global Determinista de la Simulación.
 
-Responsabilidad: Mantener la fuente de verdad de las entidades físicas. 
-Aplica (commit) los cambios del búfer transaccional una vez por ciclo
-y emite eventos al Event Bus para los observadores (métricas, logs, GUI).
+Responsabilidad: 
+Mantener la fuente de verdad de las entidades físicas. Extrae los datos del 
+búfer transaccional ('pending') y los consolida alterando los objetos en memoria 
+una vez por ciclo. Dispara eventos para la interfaz o métricas.
 """
 
 import logging
 from typing import Any, Optional, List, Dict
+
 from entities.person.person import Person
 from core.config.simulation_config import SimulationConfig
 from systems.environment.epidemiological_map import EpidemiologicalMap
 from core.state.world_grid import WorldGrid
 
-# Asumiendo que estos eventos existen en tu directorio de 'events'
 from events.population.person_born import PersonBornEvent
 from events.population.person_died import PersonDiedEvent
 from events.population.marriage_created import MarriageCreatedEvent
@@ -20,6 +21,8 @@ from events.population.divorce_occurred import DivorceOccurredEvent
 from events.population.adoption_completed import AdoptionCompletedEvent
 
 class WorldState:
+    """Contenedor de la realidad simulada. Garantiza aislamiento en la lectura."""
+
     def __init__(self, config: SimulationConfig, width: int, height: int) -> None:
         self.logger = logging.getLogger("WorldState")
         self.config = config
@@ -39,12 +42,13 @@ class WorldState:
         return self._last_entity_id
 
     def add_person(self, person: Person) -> None:
+        """Registra una nueva entidad en el plano físico del mundo."""
         self.persons[person.entity_id] = person
         if person.entity_id > self._last_entity_id:
             self._last_entity_id = person.entity_id
 
     def get_person(self, entity_id: int) -> Optional[Person]:
-        """Devuelve una persona por su ID con máxima eficiencia O(1)."""
+        """Devuelve una persona por su ID con máxima eficiencia de acceso O(1)."""
         return self.persons.get(entity_id)
         
     def get_person_by_id(self, entity_id: int) -> Optional[Person]:
@@ -52,16 +56,24 @@ class WorldState:
         return self.get_person(entity_id)
 
     def get_all_persons(self) -> List[Person]:
+        """Retorna un volcado instantáneo de todos los agentes vivos."""
         return list(self.persons.values())
 
     def apply_commit(self, pending: Any, event_bus: Any = None, current_tick: int = 0) -> None:
-        """Aplica los cambios del búfer de forma atómica (Fase de Consolidación)."""
+        """Aplica los cambios del búfer de forma atómica (Fase de Consolidación).
         
-        # 1. MUERTES: Eliminamos la referencia física para liberar RAM
+        Orden de ejecución crítico para prevenir corrupción:
+        1. Muertes (Liberación de memoria y referencias).
+        2. Envejecimiento y Salud.
+        3. Fisiología Reproductiva (Nacimientos y Embarazos).
+        4. Reestructuración legal (Adopciones, Rupturas, Matrimonios).
+        5. Físicas Espaciales (Desplazamientos).
+        """
+        
+        # 1. MUERTES: Eliminamos la referencia física primero.
         for entity_id, reason in pending.deaths.items():
             if entity_id in self.persons:
                 p = self.persons.pop(entity_id)
-                
                 if event_bus:
                     cause = "enfermedad" if getattr(p, 'is_sick', False) else "causas_naturales"
                     event_bus.publish(PersonDiedEvent(entity_id, int(p.age), cause, current_tick))
@@ -87,8 +99,11 @@ class WorldState:
         for entity_id, data in pending.pregnancy_updates.items():
             madre = self.get_person(entity_id)
             if madre:
-                madre.update_pregnancy(data["is_pregnant"], data.get("pregnancy_days", 0.0))
-                # Gestión de abortos por estrés
+                madre.update_pregnancy(
+                    data["is_pregnant"], 
+                    data.get("pregnancy_days", 0.0),
+                    data.get("litter_size", 1)  # FIX: Inyección de la camada en caliente
+                )
                 if data.get("failed_increment", 0) > 0:
                     for _ in range(data["failed_increment"]):  
                         madre.add_failed_pregnancy()
@@ -97,24 +112,22 @@ class WorldState:
             new_id = self.get_next_entity_id()
             baby_genome = data.get("genome")
             
-            # Instanciamos inyectando la configuración central
             newborn = Person(
                 config=self.config,
                 entity_id=new_id, 
                 x=data["x"], 
                 y=data["y"], 
                 age=0.0, 
-                genome=baby_genome
+                genome=baby_genome,
+                # El bebé hereda la especie del genoma que acaba de mutar
+                species=getattr(baby_genome, 'species_baseline', 'human') 
             )
             
-            # Vinculación filial en la entidad instanciada
             mother_id = data["mother_id"]
             father_id = data["father_id"]
             newborn.set_parents(mother_id, father_id)
             self.add_person(newborn)
                             
-            # Solo actualizamos el contador si los padres siguen vivos (el historial 
-            # ya pertenece a GenealogySystem, no necesitamos mantener padres fantasmas)
             madre = self.get_person(mother_id)
             padre = self.get_person(father_id) if father_id else None
             
@@ -144,17 +157,26 @@ class WorldState:
             if p:
                 p.set_position(new_x, new_y)
 
+        # Resolución simétrica de Divorcios y Viudedad
         for p_a_id, p_b_id in pending.divorces:
             pa = self.get_person(p_a_id)
             pb = self.get_person(p_b_id)
+            
             if pa and pa.partner_id == p_b_id: pa.register_divorce()
             if pb and pb.partner_id == p_a_id: pb.register_divorce()
-            if event_bus: event_bus.publish(DivorceOccurredEvent(p_a_id, p_b_id, "separacion_natural", current_tick))
+            
+            if event_bus: 
+                event_bus.publish(DivorceOccurredEvent(p_a_id, p_b_id, "separacion_natural", current_tick))
 
+        # Resolución simétrica de Matrimonios (Corrección de Bug de Asimetría)
         for p_a_id, p_b_id in pending.marriages.items():
             pa = self.get_person(p_a_id)
             pb = self.get_person(p_b_id)
+            
             if pa and pb:
                 pa.register_marriage(p_b_id)
+                # FIX: Registro recíproco obligatorio (Simetría del Grafo)
+                pb.register_marriage(p_a_id)
+                
                 if event_bus and p_a_id < p_b_id:
                     event_bus.publish(MarriageCreatedEvent(p_a_id, p_b_id, current_tick))

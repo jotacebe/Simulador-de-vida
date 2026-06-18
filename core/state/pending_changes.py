@@ -1,12 +1,10 @@
-"""Módulo de Búfer Atómico Universal del ciclo de ejecución.
+"""Módulo de Búfer Atómico Universal del ciclo de ejecución."""
 
-Actúa como un 'Staging Area' (zona de pruebas) donde los sistemas registran 
-sus intenciones sin alterar el mundo real, garantizando que el orden de 
-ejecución de los sistemas no cause efectos secundarios indeseados.
-"""
 from typing import List, Dict, Tuple, Any, Optional
 
 class PendingChanges:
+    """Contenedor de mutaciones encoladas para el estado del mundo."""
+
     def __init__(self) -> None:
         self.movements: Dict[int, Tuple[int, int]] = {}
         self.infections: List[int] = []
@@ -24,7 +22,6 @@ class PendingChanges:
         self.movements[entity_id] = (x, y)
 
     def register_birth(self, mother_id: int, father_id: Optional[int], x: int, y: int, genome: Any) -> None:
-        """Registra un nacimiento pendiente con el ADN recombinado."""
         self.births.append({
             "mother_id": mother_id,
             "father_id": father_id,
@@ -55,10 +52,15 @@ class PendingChanges:
     def register_time_pass(self, days: float) -> None:
         self.days_to_add += days
 
-    def register_pregnancy_update(self, entity_id: int, is_pregnant: bool, pregnancy_days: float) -> None:
+    def register_pregnancy_update(self, entity_id: int, is_pregnant: bool, 
+                                  pregnancy_days: float, failed_increment: int = 0,
+                                  litter_size: int = 1) -> None:
+        """Registra el avance de gestación incorporando el tamaño de camada."""
         self.pregnancy_updates[entity_id] = {
             "is_pregnant": is_pregnant,
-            "pregnancy_days": float(pregnancy_days)
+            "pregnancy_days": float(pregnancy_days),
+            "failed_increment": int(failed_increment),
+            "litter_size": int(litter_size)
         }
     
     def register_age_increment(self, entity_id: int, increment_days: float) -> None:
@@ -67,7 +69,6 @@ class PendingChanges:
         self.age_increments[entity_id] += float(increment_days)
     
     def clear(self) -> None:
-        """Limpia el búfer reasignando colecciones vacías (Memory-Safe)."""
         self.movements.clear()
         self.infections.clear()
         self.recoveries.clear()
