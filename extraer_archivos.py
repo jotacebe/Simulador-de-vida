@@ -1,6 +1,5 @@
 import os
 
-
 def archivo_tiene_contenido(ruta_archivo):
     """Devuelve True si el archivo tiene contenido no vacío."""
     try:
@@ -11,7 +10,6 @@ def archivo_tiene_contenido(ruta_archivo):
             return bool(f.read().strip())
     except Exception:
         return False
-
 
 def exportar_por_carpetas_principales(directorio_raiz, directorio_salida=None):
     """
@@ -90,13 +88,12 @@ def exportar_por_carpetas_principales(directorio_raiz, directorio_salida=None):
 
 
 if __name__ == "__main__":
-    directorio = input("Ruta del directorio principal: ").strip()
 
-    if not os.path.isdir(directorio):
-        print(f"Error: '{directorio}' no es un directorio válido.")
+    if not os.path.isdir("."):
+        print(f"Error: no es un directorio válido.")
     else:
-        salida = os.path.join(directorio, "exportados_txt")
-        total = exportar_por_carpetas_principales(directorio, salida)
+        salida = os.path.join(".", "exportados_txt")
+        total = exportar_por_carpetas_principales(".", salida)
 
         print(f"\nProceso completado. {total} carpeta(s) exportada(s).")
         print(f"Resultados guardados en: {salida}")

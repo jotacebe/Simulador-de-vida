@@ -6,6 +6,7 @@ import random
 from typing import Optional, List, Dict, Any
 from .genome import Genome
 from core.config.simulation_config import SimulationConfig
+from systems.diseases.pathogen import Pathogen
 
 class Person:
     """Entidad autónoma con estados fisiológicos y psicológicos dinámicos."""
@@ -24,17 +25,19 @@ class Person:
         self._entity_id = entity_id
         self._species = species
         
-        # ---------------- Fisiología y Espacio ----------------
         self._x = x
         self._y = y
         self._age = age 
         self._gender = gender if gender else random.choice(["M", "F"])
         self._genome = genome if genome else Genome(species_baseline=species)
         
-        self._is_sick = False
         self._health_state = "sano" 
         self._is_adult = False
         self._is_senior = False
+        
+        # ---------------- Historial Inmunológico y Carga Viral (NUEVO) ----------------
+        self._active_pathogens: Dict[str, Pathogen] = {}
+        self._immune_memory: Dict[str, float] = {}  # Memoria adquirida por familia viral
         
         # ---------------- Relaciones y Reproducción ----------------
         self._partner_id = None
@@ -45,7 +48,7 @@ class Person:
         self._pregnancy_days = 0.0
         self._failed_pregnancies = 0
         self._children_count = 0
-        self._litter_size_gestating = 1  # Capacidad multiespecie (Camadas)
+        self._litter_size_gestating = 1
         
         self._mother_id = None
         self._father_id = None
@@ -91,8 +94,6 @@ class Person:
     @property
     def partner_id(self) -> Optional[int]: return self._partner_id
     @property
-    def is_sick(self) -> bool: return self._is_sick
-    @property
     def genome(self) -> Genome: return self._genome
     @property
     def children_count(self) -> int: return self._children_count
@@ -116,6 +117,12 @@ class Person:
     def memory(self) -> Dict[str, Any]: return self._memory
     @property
     def emotions(self) -> Dict[str, float]: return self._emotions
+    @property
+    def active_pathogens(self) -> Dict[str, Pathogen]: return self._active_pathogens
+
+    # Compatibilidad retroactiva inteligente (True si hay patógenos activos)
+    @property
+    def is_sick(self) -> bool: return len(self._active_pathogens) > 0
 
     @property
     def effective_sociability(self) -> float:
@@ -131,7 +138,41 @@ class Person:
         return max(0.1, min(2.0, base - (trauma * 0.5)))
 
     # ==========================================
-    # MÉTODOS DE ESTADO Y COMPORTAMIENTO
+    # SISTEMA INMUNOLÓGICO Y SALUD (NUEVO)
+    # ==========================================
+    def get_specific_immunity(self, family: str) -> float:
+        """Calcula la resistencia combinando Genética (Innata) + Historial (Adquirida)."""
+        base_innate = max(0.1, self._genome.immunity - ((1.0 - self._emotions["energy"]) * 0.2))
+        acquired_bonus = self._immune_memory.get(family, 0.0)
+        return min(3.0, base_innate + acquired_bonus)
+
+    def infect(self, pathogen: Pathogen) -> None:
+        """Infecta al agente con una cepa específica y aplica penalizaciones."""
+        self._active_pathogens[pathogen.pathogen_id] = pathogen
+        self._health_state = "enfermo"
+        self.update_emotion("stress", 0.3)
+        self.update_emotion("energy", -0.4)
+
+    def recover(self, pathogen_id: str) -> None:
+        """Elimina el patógeno y genera anticuerpos (memoria inmunológica)."""
+        if pathogen_id in self._active_pathogens:
+            pathogen = self._active_pathogens.pop(pathogen_id)
+            
+            # El cuerpo genera defensas específicas para esa familia viral
+            current_acquired = self._immune_memory.get(pathogen.family, 0.0)
+            self._immune_memory[pathogen.family] = min(1.5, current_acquired + 0.4)
+            
+        if not self._active_pathogens:
+            self._health_state = "sano"
+
+    def set_health_state(self, new_state: str):
+        """Mantiene compatibilidad con subsistemas antiguos."""
+        if new_state == "sano":
+            self._active_pathogens.clear()
+            self._health_state = "sano"
+
+    # ==========================================
+    # MÉTODOS DE COMPORTAMIENTO RESTANTES
     # ==========================================
     def set_position(self, x: int, y: int):
         self._x, self._y = x, y
@@ -142,17 +183,8 @@ class Person:
 
     def _check_milestones(self):
         time_cfg = self._config.time
-        if self._age >= time_cfg.adult_age_days:
-            self._is_adult = True
-        if self._age >= time_cfg.senior_age_days:
-            self._is_senior = True
-
-    def set_health_state(self, new_state: str):
-        self._health_state = new_state
-        self._is_sick = (new_state == "enfermo")
-        if self._is_sick:
-            self.update_emotion("stress", 0.3)
-            self.update_emotion("energy", -0.4)
+        if self._age >= time_cfg.adult_age_days: self._is_adult = True
+        if self._age >= time_cfg.senior_age_days: self._is_senior = True
 
     def register_marriage(self, partner_id: int):
         self._partner_id = partner_id
@@ -167,7 +199,6 @@ class Person:
         self.update_emotion("happiness", -0.5)
 
     def update_pregnancy(self, status: bool, days: float = 0.0, litter_size: int = 1):
-        """Actualiza el estado reproductivo soportando camadas (múltiples fetos)."""
         self._is_pregnant = bool(status)
         self._pregnancy_days = float(days)
         self._litter_size_gestating = int(litter_size) if status else 1
@@ -200,10 +231,11 @@ class Person:
         return repo_cfg.min_fertility_age_days <= self._age <= repo_cfg.max_fertility_age_days
 
     def can_reproduce(self) -> bool:
-        return self.is_fertile() and not self._is_pregnant and not self._is_sick
+        return self.is_fertile() and not self._is_pregnant and not self.is_sick
 
     def get_longevity(self) -> float:
         return self._genome.longevity
 
     def get_immunity(self) -> float:
-        return max(0.1, self._genome.immunity - ( (1.0 - self._emotions["energy"]) * 0.2 ))
+        # Fallback genérico para compatibilidad
+        return max(0.1, self._genome.immunity - ((1.0 - self._emotions["energy"]) * 0.2))

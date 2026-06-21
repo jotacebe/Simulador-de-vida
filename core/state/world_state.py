@@ -14,6 +14,7 @@ from core.config.simulation_config import SimulationConfig
 from systems.environment.epidemiological_map import EpidemiologicalMap
 from core.state.world_grid import WorldGrid
 
+# Asumiendo que estos eventos existen en tu directorio de 'events'
 from events.population.person_born import PersonBornEvent
 from events.population.person_died import PersonDiedEvent
 from events.population.marriage_created import MarriageCreatedEvent
@@ -64,19 +65,20 @@ class WorldState:
         
         Orden de ejecución crítico para prevenir corrupción:
         1. Muertes (Liberación de memoria y referencias).
-        2. Envejecimiento y Salud.
-        3. Fisiología Reproductiva (Nacimientos y Embarazos).
-        4. Reestructuración legal (Adopciones, Rupturas, Matrimonios).
-        5. Físicas Espaciales (Desplazamientos).
+        2. Envejecimiento (Desgaste celular).
+        3. Salud Médica (Infecciones virales y recuperación).
+        4. Fisiología Reproductiva (Nacimientos y Embarazos).
+        5. Reestructuración legal (Adopciones, Rupturas, Matrimonios).
+        6. Físicas Espaciales (Desplazamientos).
         """
         
-        # 1. MUERTES: Eliminamos la referencia física primero.
+        # 1. MUERTES: Eliminamos la referencia física primero para liberar memoria
         for entity_id, reason in pending.deaths.items():
             if entity_id in self.persons:
                 p = self.persons.pop(entity_id)
                 if event_bus:
-                    cause = "enfermedad" if getattr(p, 'is_sick', False) else "causas_naturales"
-                    event_bus.publish(PersonDiedEvent(entity_id, int(p.age), cause, current_tick))
+                    # 'reason' ahora incluye el diagnóstico forense detallado del MortalitySystem
+                    event_bus.publish(PersonDiedEvent(entity_id, int(p.age), reason, current_tick))
 
         # 2. ENVEJECIMIENTO FÍSICO
         for entity_id, days in pending.age_increments.items():
@@ -84,16 +86,16 @@ class WorldState:
             if person:
                 person.add_age(days)
 
-        # 3. SALUD (Contagios y Recuperaciones)
-        for entity_id in pending.infections:
+        # 3. SALUD MÉDICA AVANZADA (Contagios con Pathogens y Recuperaciones)
+        for entity_id, pathogen in pending.infections:
             p = self.get_person(entity_id)
             if p:
-                p.set_health_state("enfermo")
+                p.infect(pathogen)
                 
-        for entity_id in getattr(pending, 'recoveries', []):
+        for entity_id, pathogen_id in pending.recoveries:
             p = self.get_person(entity_id)
             if p:
-                p.set_health_state("sano")
+                p.recover(pathogen_id)
 
         # 4. EMBARAZOS Y NACIMIENTOS
         for entity_id, data in pending.pregnancy_updates.items():
@@ -102,8 +104,9 @@ class WorldState:
                 madre.update_pregnancy(
                     data["is_pregnant"], 
                     data.get("pregnancy_days", 0.0),
-                    data.get("litter_size", 1)  # FIX: Inyección de la camada en caliente
+                    data.get("litter_size", 1)
                 )
+                # Gestión de abortos por estrés
                 if data.get("failed_increment", 0) > 0:
                     for _ in range(data["failed_increment"]):  
                         madre.add_failed_pregnancy()
@@ -112,6 +115,7 @@ class WorldState:
             new_id = self.get_next_entity_id()
             baby_genome = data.get("genome")
             
+            # Instanciación con inyección multiespecie extraída del genoma
             newborn = Person(
                 config=self.config,
                 entity_id=new_id, 
@@ -119,8 +123,7 @@ class WorldState:
                 y=data["y"], 
                 age=0.0, 
                 genome=baby_genome,
-                # El bebé hereda la especie del genoma que acaba de mutar
-                species=getattr(baby_genome, 'species_baseline', 'human') 
+                species=getattr(baby_genome, 'species_baseline', 'human')
             )
             
             mother_id = data["mother_id"]
@@ -151,7 +154,7 @@ class WorldState:
                 if event_bus:
                     event_bus.publish(AdoptionCompletedEvent(child.entity_id, parent_a.entity_id, getattr(parent_b, 'entity_id', None), current_tick))
         
-        # 6. RELACIONES Y MOVIMIENTOS
+        # 6. RELACIONES Y MOVIMIENTOS ESPACIALES
         for entity_id, (new_x, new_y) in pending.movements.items():
             p = self.get_person(entity_id)
             if p:
@@ -168,14 +171,13 @@ class WorldState:
             if event_bus: 
                 event_bus.publish(DivorceOccurredEvent(p_a_id, p_b_id, "separacion_natural", current_tick))
 
-        # Resolución simétrica de Matrimonios (Corrección de Bug de Asimetría)
+        # Resolución simétrica de Matrimonios (Garantiza integridad del grafo bidireccional)
         for p_a_id, p_b_id in pending.marriages.items():
             pa = self.get_person(p_a_id)
             pb = self.get_person(p_b_id)
             
             if pa and pb:
                 pa.register_marriage(p_b_id)
-                # FIX: Registro recíproco obligatorio (Simetría del Grafo)
                 pb.register_marriage(p_a_id)
                 
                 if event_bus and p_a_id < p_b_id:

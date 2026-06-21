@@ -1,119 +1,111 @@
-"""Módulo responsable del comportamiento autónomo y decisiones estocásticas de los agentes."""
+"""Módulo de Libre Albedrío implementado como un Sistema de Desviación Estocástica.
+
+Modifica el comportamiento basal de los habitantes inyectando impulsos anómalos
+y decisiones rebeldes que rompen las restricciones normativas de la simulación.
+"""
 
 import random
-import math
 import logging
-from typing import Any
+from typing import Any, Dict
 from core.state.world_state import WorldState
 from core.state.pending_changes import PendingChanges
 from systems.environment.environment_context import EnvironmentContext
 from core.config.simulation_config import SimulationConfig
 
 class FreeWillSystem:
-    """Motor de decisiones probabilísticas modelado en tiempo continuo.
-    
-    Permite a las entidades transgredir las reglas sociales estándar (migraciones 
-    forzadas, divorcios espontáneos o rebelión reproductiva) basándose en 
-    sus mapas genéticos y sus experiencias cognitivas pasadas.
-    """
+    """Sistema que gestiona impulsos rebeldes y desviaciones normativas de los agentes."""
+
+    # Identificadores de impulsos anómalos
+    FLAG_TABOO_RELATION = "allow_taboo_relation"   
+    FLAG_EARLY_LEAVE = "runaway_impulse"           
+    FLAG_OUT_OF_WEDLOCK = "ignore_marriage_norm"   
+    FLAG_SINGLE_PARENT = "monoparental_drive"       
+    FLAG_UNEXPECTED_MIGRATION = "erratic_explorer"  
 
     def __init__(self, config: SimulationConfig) -> None:
-        """Inicializa el sistema vinculándolo a la configuración centralizada."""
         self.config = config
-        self.logger = logging.getLogger("FreeWillSystem")
+        self.logger = logging.getLogger(self.__class__.__name__)
+        self.base_anomaly_chance = 0.015
 
     def process(self, state: WorldState, pending: PendingChanges, 
                 delta_days: float, context: EnvironmentContext) -> None:
-        """Evalúa las intenciones autónomas de la población activa."""
-        fw_cfg = self.config.free_will
-
+        
         for person in state.get_all_persons():
-            # Filtro de contingencia
-            if person.entity_id in pending.deaths: 
+            if person.entity_id in pending.deaths:
                 continue
 
-            # INTEGRACIÓN COGNITIVA: Respetamos el periodo refractario mental.
-            # Evita que un agente tome múltiples decisiones extremas consecutivas.
-            memory = getattr(person, 'memory', {})
-            if memory.get("rebellion_cooldown", 0.0) > 0:
-                continue
-
-            temperament = person.genome.temperament
-            sociability = person.genome.sociability
+            # ==========================================================
+            # BLINDAJE: USAMOS EL DICCIONARIO NATIVO 'MEMORY'
+            # ==========================================================
+            # Usamos person.memory, que sabemos 100% que existe y es un dict
+            memory_dict = person.memory
             
-            # Tasa base diaria individual:
-            # Agentes impulsivos (alto temperamento) y asociales (baja sociabilidad) 
-            # son más propensos a tomar decisiones de ruptura con su entorno.
-            daily_rate = fw_cfg.base_daily_chance * (1.0 + (temperament * 0.6) - (sociability * 0.3))
-            daily_rate = max(0.0001, min(1.0, daily_rate))
-
-            # ACCIÓN 1: Divorcio Espontáneo
-            if person.partner_id is not None and temperament > fw_cfg.divorce_temperament_threshold:
-                # Utilizamos la fórmula de Poisson para probabilidades continuas
-                divorce_rate = daily_rate * fw_cfg.divorce_chance_multiplier
-                total_divorce_chance = 1.0 - math.exp(-divorce_rate * delta_days)
-                
-                if random.random() < total_divorce_chance:
-                    pending.register_divorce(person.entity_id, person.partner_id)
-                    self._apply_cognitive_cooldown(person)
-                    continue
-
-            # ACCIÓN 2: Migración
-            density = context.get_local_pressure(person.x, person.y)
-            is_overcrowded = density > fw_cfg.migration_density_threshold
+            flags = memory_dict.get("free_will_flags")
             
-            # La migración por hacinamiento es una huida inmediata por estrés.
-            # La migración social (baja sociabilidad) obedece a un deseo acumulado.
-            if is_overcrowded:
-                self._execute_migration(person, state, pending, fw_cfg.migration_radius, context)
-                self._apply_cognitive_cooldown(person)
-                continue
-            elif sociability < fw_cfg.migration_sociability_threshold:
-                migration_rate = daily_rate * fw_cfg.migration_chance_multiplier
-                total_migration_chance = 1.0 - math.exp(-migration_rate * delta_days)
-                
-                if random.random() < total_migration_chance:
-                    self._execute_migration(person, state, pending, fw_cfg.migration_radius, context)
-                    self._apply_cognitive_cooldown(person)
-                    continue
+            # Inicializamos dentro de memory si no existe
+            if not isinstance(flags, dict):
+                flags = {
+                    self.FLAG_TABOO_RELATION: False,
+                    self.FLAG_EARLY_LEAVE: False,
+                    self.FLAG_OUT_OF_WEDLOCK: False,
+                    self.FLAG_SINGLE_PARENT: False,
+                    self.FLAG_UNEXPECTED_MIGRATION: False
+                }
+                memory_dict["free_will_flags"] = flags
 
-            # ACCIÓN 3: Rebelión Reproductiva
-            # Una decisión biológica espontánea de rechazar el límite normativo de natalidad
-            if getattr(person, 'children_count', 0) >= fw_cfg.fertility_rebellion_children_threshold and temperament > fw_cfg.fertility_rebellion_temperament_threshold:
-                total_rebellion_chance = 1.0 - math.exp(-daily_rate * delta_days)
-                
-                if random.random() < total_rebellion_chance:
-                    # TODO (Arquitectura): Idealmente esta mutación interna debería ser 
-                    # interceptada a través del PendingChanges.register_trait_mutation()
-                    person.is_free_will_fertile = True
-                    self._apply_cognitive_cooldown(person)
+            # Asegurar claves requeridas
+            for default_flag in [self.FLAG_TABOO_RELATION, self.FLAG_EARLY_LEAVE, 
+                                 self.FLAG_OUT_OF_WEDLOCK, self.FLAG_SINGLE_PARENT, 
+                                 self.FLAG_UNEXPECTED_MIGRATION]:
+                if default_flag not in flags:
+                    flags[default_flag] = False
 
-    def _apply_cognitive_cooldown(self, person: Any) -> None:
-        """Aplica un estado de shock/satisfacción bloqueando nuevas decisiones un tiempo."""
-        if hasattr(person, 'memory'):
-            # El agente descansa de decisiones radicales durante 1 año biológico
-            person.memory["rebellion_cooldown"] = 365.0
-
-    def _execute_migration(self, person: Any, state: WorldState, 
-                           pending: PendingChanges, radius: int, 
-                           context: EnvironmentContext) -> None:
-        """Calcula y registra un movimiento de migración topológicamente válido."""
-        memory = getattr(person, 'memory', {})
-        preferred = memory.get("preferred_sector")
-        
-        # Integración de Libre Albedrío + Memoria Cognitiva
-        # Si el agente fue próspero en otro sector, intentará volver a él
-        if preferred is not None:
-            # Apunta al centro aproximado del sector preferido
-            target_x = (preferred[0] * context.sector_size) + (context.sector_size // 2)
-            target_y = (preferred[1] * context.sector_size) + (context.sector_size // 2)
-        else:
-            # Migración a ciegas
-            target_x = person.x + random.randint(-radius, radius)
-            target_y = person.y + random.randint(-radius, radius)
+            # ==========================================================
+            # PRIORIZACIÓN DINÁMICA DE ANOMALÍAS
+            # ==========================================================
+            energy = person.emotions.get("energy", 1.0) if hasattr(person, 'emotions') else 1.0
+            trauma = person.memory.get("trauma_overcrowding", 0.0)
+            local_pressure = context.get_local_pressure(person.x, person.y)
             
-        # Clamping para no salirse del mapa
-        new_x = max(0, min(state.width - 1, target_x))
-        new_y = max(0, min(state.height - 1, target_y))
-        
-        pending.register_movement(person.entity_id, new_x, new_y)
+            stress_multiplier = 1.0 + ((1.0 - energy) * 2.0) + (trauma * 3.0) + (local_pressure - 1.0)
+            dynamic_chance = self.base_anomaly_chance * max(1.0, stress_multiplier)
+
+            # ==========================================================
+            # TIRADA DE DADOS ESTOCÁSTICA (ESCRITURA SEGURA)
+            # ==========================================================
+            
+            if random.random() < (dynamic_chance * 0.5):
+                flags[self.FLAG_TABOO_RELATION] = True
+            
+            age = getattr(person, 'age', 0)
+            if 10 <= age < 18:
+                home_stress = dynamic_chance * (2.0 if trauma > 0.5 else 1.0)
+                if random.random() < home_stress:
+                    flags[self.FLAG_EARLY_LEAVE] = True
+
+            if random.random() < dynamic_chance:
+                flags[self.FLAG_OUT_OF_WEDLOCK] = True
+
+            if random.random() < (dynamic_chance * 1.2):
+                flags[self.FLAG_SINGLE_PARENT] = True
+
+            if random.random() < (dynamic_chance * 0.8):
+                flags[self.FLAG_UNEXPECTED_MIGRATION] = True
+
+    @staticmethod
+    def has_impulse(person: Any, flag_name: str) -> bool:
+        """Método utilitario estático para consultar el libre albedrío."""
+        if not hasattr(person, 'memory') or not isinstance(person.memory, dict):
+            return False
+        flags = person.memory.get("free_will_flags")
+        if not isinstance(flags, dict):
+            return False
+        return flags.get(flag_name, False)
+
+    @staticmethod
+    def consume_impulse(person: Any, flag_name: str) -> None:
+        """Apaga el impulso una vez ejecutado para que no se repita en bucle."""
+        if hasattr(person, 'memory') and isinstance(person.memory, dict):
+            flags = person.memory.get("free_will_flags")
+            if isinstance(flags, dict) and flag_name in flags:
+                flags[flag_name] = False
