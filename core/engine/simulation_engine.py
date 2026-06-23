@@ -18,6 +18,7 @@ from core.config.simulation_config import SimulationConfig
 from core.engine.phase_scheduler import PhaseScheduler
 from core.execution.execution_pipeline import ExecutionPipeline
 from core.state.world_state import WorldState
+from entities.person.allele import Allele, Gene
 from entities.person.genome import Genome
 from entities.person.person import Person
 
@@ -40,7 +41,6 @@ class SimulationEngine:
             pipeline: Pipeline responsable de ejecutar los sistemas por tick.
             event_bus: Bus de eventos opcional para publicar cambios.
         """
-
         self.state = world_state
         self.config = config
         self.pipeline = pipeline
@@ -55,7 +55,7 @@ class SimulationEngine:
         height: int = 100,
         founding_population_size: int = 50,
         event_bus: Any = None,
-    ) -> "SimulationEngine":
+    ) -> SimulationEngine:
         """Crea un motor completo usando la configuración por defecto.
 
         Args:
@@ -69,7 +69,6 @@ class SimulationEngine:
         Returns:
             Instancia de ``SimulationEngine`` lista para ejecutarse.
         """
-
         config = SimulationConfig()
 
         if config_path:
@@ -103,7 +102,6 @@ class SimulationEngine:
             Exception: Propaga fallos del pipeline o del commit para evitar
                 confirmar ticks corruptos.
         """
-
         total_days = float(self.config.engine.total_days)
         delta_days = float(self.config.engine.delta_days)
 
@@ -163,7 +161,6 @@ class SimulationEngine:
             json.JSONDecodeError: Si el archivo no contiene JSON válido.
             OSError: Si el archivo no se puede leer.
         """
-
         logger = logging.getLogger("SimulationEngine")
 
         if not os.path.exists(filepath):
@@ -190,37 +187,33 @@ class SimulationEngine:
         state: WorldState,
         size: int,
     ) -> None:
-        """Crea la población inicial de la simulación.
+        """Crea la población inicial de la simulación de forma determinista.
 
         Args:
             config: Configuración compartida de la simulación.
             state: Estado del mundo donde se insertarán los agentes.
             size: Número de agentes fundadores.
         """
-
         logger = logging.getLogger("SimulationEngine")
         logger.info("Generando %s agentes fundadores.", size)
 
         for entity_id in range(1, size + 1):
-            genome = Genome()
-            genome.fertility = random.uniform(0.5, 0.9)
-            genome.sociability = random.uniform(0.1, 0.9)
-            genome.temperament = random.uniform(0.1, 0.9)
-            genome.immunity = random.uniform(0.4, 0.8)
+            # 1. Generamos los valores fenotípicos base para el fundador
+            base_fertility = random.uniform(0.5, 0.9)
+            base_sociability = random.uniform(0.1, 0.9)
+            base_temperament = random.uniform(0.1, 0.9)
+            base_immunity = random.uniform(0.4, 0.8)
 
-            person = Person(
-                config=config,
-                entity_id=entity_id,
-                x=random.randint(10, 90),
-                y=random.randint(10, 90),
-                age=random.uniform(6500.0, 11000.0),
-                genome=genome,
+            # 2. Construimos los genes diploides (con 2 alelos cada uno)
+            gene_fertility = Gene(
+                allele_a=Allele.create_random(base_fertility, 0.1),
+                allele_b=Allele.create_random(base_fertility, 0.1)
             )
-
-            person.set_health_state("sano")
-            person.update_pregnancy(False, 0.0)
-
-            partner_id = entity_id + 1 if entity_id % 2 else entity_id - 1
-            person.register_marriage(partner_id)
-
-            state.add_person(person)
+            gene_sociability = Gene(
+                allele_a=Allele.create_random(base_sociability, 0.1),
+                allele_b=Allele.create_random(base_sociability, 0.1)
+            )
+            gene_temperament = Gene(
+                allele_a=Allele.create_random(base_temperament, 0.1),
+                allele_b=Allele.create_random(base_temperament, 0.1)
+            )

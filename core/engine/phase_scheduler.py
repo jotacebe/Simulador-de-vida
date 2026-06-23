@@ -15,9 +15,10 @@ Cada tick completo procesa las siguientes fases en estricto orden secuencial:
    - Actualiza la memoria cognitiva de los agentes según el estrés del entorno.
 
 3. Fase de Movimiento y Conducta ('behavior_and_movement'):
-   - Evalúa decisiones autónomas (libre albedrío, migración).
-   - Genera vectores de desplazamiento para el tick.
-   - Resuelve colisiones espaciales garantizando que no se violen las leyes de la física.
+   - Evalúa decisiones autónomas y rebeldía (FreeWillSystem).
+   - Calcula vectores de migración masiva (MigrationSystem).
+   - Genera vectores de desplazamiento para el tick (MovementSystem).
+   - Resuelve colisiones espaciales físicas (MovementResolver).
 
 4. Fase Social ('relationships'):
    - Purga relaciones inválidas y declara viudedades.
@@ -67,6 +68,7 @@ from systems.genealogy.genealogy_system import GenealogySystem
 from systems.metrics.metrics_system import MetricsSystem
 from systems.mortality.death_resolver import DeathResolver
 from systems.mortality.mortality_system import MortalitySystem
+from systems.movement.migration_system import MigrationSystem
 from systems.movement.movement_resolver import MovementResolver
 from systems.movement.movement_system import MovementSystem
 from systems.relationships.marriage_system import MarriageSystem
@@ -77,7 +79,7 @@ from systems.temporal.temporal_system import TemporalSystem
 
 
 class PhaseScheduler:
-    """Construye la lista maestra de fases y sistemas activos."""
+    """Construye la lista maestra de fases y sistemas activos del motor."""
 
     def __init__(self, config: SimulationConfig) -> None:
         """Inicializa el planificador orquestando la inyección de dependencias.
@@ -91,14 +93,13 @@ class PhaseScheduler:
     def build_phases(self) -> list[PhaseDefinition]:
         """Ensambla las fases de ejecución en el orden del ciclo principal.
 
-        Se aplican inyecciones cruzadas seguras (e.g., el sistema evolutivo
-        depende del árbol genealógico, y el sistema de movimiento de la densidad).
+        Se aplican inyecciones cruzadas seguras garantizando que se resuelvan
+        las dependencias inter-sistema antes de la ejecución del pipeline.
 
         Returns:
             Lista ordenada de fases que serán ejecutadas por el pipeline.
         """
-
-        # Construcción de dependencias compartidas
+        # Construcción de dependencias compartidas inter-sistema
         genealogy_system = GenealogySystem(self.config)
         ancestry_queries = AncestryQueries(genealogy_system=genealogy_system)
 
@@ -114,14 +115,15 @@ class PhaseScheduler:
             ancestry_queries=ancestry_queries,
         )
 
-        # Definición estructurada del ciclo
+        # Definición estructurada del ciclo biológico y físico
+        # Nota: Se añade ignore[arg-type] para mitigar la invarianza estricta de listas en Python
         phases = [
             PhaseDefinition(
                 name="temporal",
                 systems=[
                     TemporalSystem(self.config),
                     AgingSystem(self.config),
-                ],
+                ],  # type: ignore[arg-type]
             ),
             PhaseDefinition(
                 name="environment",
@@ -130,19 +132,20 @@ class PhaseScheduler:
                     density_system,
                     EpidemiologicalSystem(self.config),
                     CognitiveMemorySystem(self.config),
-                ],
+                ],  # type: ignore[arg-type]
             ),
             PhaseDefinition(
                 name="behavior_and_movement",
                 systems=[
                     FreeWillSystem(self.config),
+                    MigrationSystem(self.config),
                     MovementSystem(
                         config=self.config,
                         density_system=density_system,
                         relationship_system=relationship_system,
                     ),
                     MovementResolver(self.config),
-                ],
+                ],  # type: ignore[arg-type]
             ),
             PhaseDefinition(
                 name="relationships",
@@ -153,13 +156,13 @@ class PhaseScheduler:
                         ancestry_queries=ancestry_queries,
                     ),
                     AdoptionSystem(self.config),
-                ],
+                ],  # type: ignore[arg-type]
             ),
             PhaseDefinition(
                 name="health",
                 systems=[
                     DiseaseSystem(self.config),
-                ],
+                ],  # type: ignore[arg-type]
             ),
             PhaseDefinition(
                 name="reproduction",
@@ -169,14 +172,14 @@ class PhaseScheduler:
                         config=self.config,
                         evolution_engine=evolution_engine,
                     ),
-                ],
+                ],  # type: ignore[arg-type]
             ),
             PhaseDefinition(
                 name="mortality",
                 systems=[
                     MortalitySystem(self.config),
                     DeathResolver(self.config),
-                ],
+                ],  # type: ignore[arg-type]
             ),
             PhaseDefinition(
                 name="observers",
@@ -184,7 +187,7 @@ class PhaseScheduler:
                     genealogy_system,
                     MetricsSystem(self.config),
                     evolution_engine,
-                ],
+                ],  # type: ignore[arg-type]
             ),
         ]
 
@@ -222,5 +225,6 @@ class PhaseScheduler:
                 if not callable(process):
                     system_name = system.__class__.__name__
                     raise TypeError(
-                        f"Fallo estructural: El sistema {system_name} no implementa process(...)."
+                        f"Fallo estructural: El sistema {system_name} no "
+                        f"implementa el método requerido process(...)."
                     )

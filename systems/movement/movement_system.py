@@ -1,8 +1,8 @@
 """Módulo responsable de la navegación espacial basada en Utilidad (Utility AI).
 
 Sustituye el movimiento lineal o aleatorio por un sistema de Campos de Potencial.
-Las entidades evalúan su vecindad espacial ponderando la atracción hacia los 
-recursos y vínculos sociales, y la repulsión hacia enfermedades y hacinamiento.
+Las entidades evalúan su vecindad ponderando recursos, epidemias, hacinamiento y
+vectores de migración a larga distancia.
 """
 
 import math
@@ -33,14 +33,9 @@ class MovementSystem:
 
     def process(self, state: WorldState, pending: PendingChanges, 
                 delta_days: float, context: EnvironmentContext) -> None:
-        """Calcula el vector de movimiento óptimo para cada agente vivo.
-        
-        Evalúa el entorno inmediato y selecciona la celda con mayor score
-        de supervivencia y afinidad social.
-        """
+        """Calcula el vector de movimiento óptimo para cada agente vivo."""
         move_cfg = self.config.movement
         
-        # Radio de evaluación dinámico basado en la capacidad de movimiento
         distance_capacity = move_cfg.base_speed * delta_days
         eval_radius = max(1, int(math.ceil(distance_capacity)))
         
@@ -48,7 +43,7 @@ class MovementSystem:
         max_y = state.height - 1
 
         for person in state.get_all_persons():
-            # 1. INTEGRIDAD DE ESTADO (No mover fallecidos)
+            # 1. INTEGRIDAD DE ESTADO
             if person.entity_id in pending.deaths:
                 continue
 
@@ -69,18 +64,15 @@ class MovementSystem:
 
                     nx, ny = person.x + dx, person.y + dy
                     
-                    # Respetar bordes del mapa
                     if not (0 <= nx <= max_x and 0 <= ny <= max_y):
                         continue
 
-                    # Obtener la puntuación de utilidad de la celda objetivo
                     score = self._evaluate_cell_utility(
                         person=person, x=nx, y=ny, 
                         state=state, context=context, 
                         social_target=social_target
                     )
 
-                    # Ruido estocástico controlado para evitar bucles de empate deterministas
                     score += random.uniform(-0.01, 0.01)
 
                     if score > best_score:
@@ -97,12 +89,12 @@ class MovementSystem:
         """Calcula matemáticamente la deseabilidad de una coordenada espacial."""
         score = 0.0
         
-        # A. RECURSOS Y ENERGÍA (Fuerza de Atracción)
-        energy_deficit = 1.0 - person.emotions.get("energy", 1.0)
+        # A. RECURSOS Y ENERGÍA
+        energy_deficit = 1.0 - getattr(person, 'emotions', {}).get("energy", 1.0)
         resources = getattr(context, 'get_resources_at', lambda x, y: 0.5)(x, y)
         score += (resources * energy_deficit * 10.0)
 
-        # B. EPIDEMIOLOGÍA: BLINDAJE ABSOLUTO CON AISLAMIENTO DE EXCEPCIONES
+        # B. EPIDEMIOLOGÍA BLINDADA AL 100%
         viral_load = 0.0
         ep_map = getattr(state, 'epidemiological_map', None)
         
@@ -111,7 +103,6 @@ class MovementSystem:
                 raw_result = None
                 method_executed = False
                 
-                # Intentamos buscar y ejecutar el método dinámicamente
                 for method_name in ['get_load_at', 'get_viral_load', 'get_load', 'get_density_at']:
                     method = getattr(ep_map, method_name, None)
                     if callable(method):
@@ -121,39 +112,45 @@ class MovementSystem:
                             break
                         except Exception:
                             try:
-                                # Intento alternativo si la firma pide una tupla de coordenadas
                                 raw_result = method((x, y))
                                 method_executed = True
                                 break
                             except Exception:
                                 continue
                 
-                # Si los métodos fallaron o no existen, intentamos inspeccionar diccionarios comunes
                 if not method_executed:
                     matrix = getattr(ep_map, 'matrix', getattr(ep_map, '_cells', None))
                     if isinstance(matrix, dict):
                         raw_result = matrix.get((x, y), 0.0)
                 
-                # Evaluación estricta del resultado: Solo aceptamos tipos numéricos puros.
-                # Si es un objeto complejo, una lista o None, pasamos olímpicamente de él (viral_load = 0.0)
                 if isinstance(raw_result, (int, float)):
                     viral_load = float(raw_result)
-                    
             except Exception:
-                # Ante CUALQUIER error no previsto en la llamada o el parseo, la carga se evalúa neutral (0.0)
                 viral_load = 0.0
 
         score -= (viral_load * 15.0)
 
-        # C. PRESIÓN AMBIENTAL Y SOBREPOBLACIÓN (Fuerza de Repulsión)
-        density = state.world_grid.get_density_at(x, y)
-        trauma_crowding = person.memory.get("trauma_overcrowding", 0.0)
+        # C. PRESIÓN AMBIENTAL Y SOBREPOBLACIÓN
+        density = context.get_local_pressure(x, y)
+        trauma_crowding = getattr(person, 'memory', {}).get("trauma_overcrowding", 0.0) if isinstance(getattr(person, 'memory', None), dict) else 0.0
         crowding_penalty = 1.0 + (trauma_crowding * 5.0)
         score -= (density * crowding_penalty)
 
-        # D. ANCLAJE SOCIAL (Fuerza de Atracción hacia la Pareja/Familia)
+        # D. ANCLAJE SOCIAL
         if social_target:
             dist_to_target = math.sqrt((social_target.x - x)**2 + (social_target.y - y)**2)
             score -= (dist_to_target * 2.0)
+
+        # =================================================================
+        # E. VECTOR DE MIGRACIÓN (Nuevo integrador del Punto 14)
+        # =================================================================
+        if isinstance(getattr(person, 'memory', None), dict):
+            migration_target = person.memory.get("migration_target")
+            if migration_target is not None:
+                tx, ty = migration_target
+                dist_to_migration = math.sqrt((tx - x)**2 + (ty - y)**2)
+                # Al restar la distancia, las celdas que acortan el camino ganan muchísimos puntos.
+                # Se pondera x10 para que anule el comportamiento errático de exploración.
+                score -= (dist_to_migration * 10.0) 
             
         return score
