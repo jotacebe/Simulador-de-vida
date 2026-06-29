@@ -13,7 +13,7 @@ from core.engine.simulation_engine import SimulationEngine
 
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 

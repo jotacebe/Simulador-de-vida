@@ -7,24 +7,26 @@ una vez por ciclo. Dispara eventos para la interfaz o métricas.
 """
 
 import logging
-from typing import Any, Optional, List, Dict
+from typing import Any, Dict, List, Optional
 
-from entities.person.person import Person
 from core.config.simulation_config import SimulationConfig
-from systems.environment.epidemiological_map import EpidemiologicalMap
 from core.state.world_grid import WorldGrid
+from entities.person.person import Person
+from systems.environment.epidemiological_map import EpidemiologicalMap
 
-# Asumiendo que estos eventos existen en tu directorio de 'events'
+# Eventos poblacionales importados
+from events.population.adoption_completed import AdoptionCompletedEvent
+from events.population.divorce_occurred import DivorceOccurredEvent
+from events.population.marriage_created import MarriageCreatedEvent
 from events.population.person_born import PersonBornEvent
 from events.population.person_died import PersonDiedEvent
-from events.population.marriage_created import MarriageCreatedEvent
-from events.population.divorce_occurred import DivorceOccurredEvent
-from events.population.adoption_completed import AdoptionCompletedEvent
+
 
 class WorldState:
     """Contenedor de la realidad simulada. Garantiza aislamiento en la lectura."""
 
     def __init__(self, config: SimulationConfig, width: int, height: int) -> None:
+        """Inicializa el estado del mundo y sus dimensiones espaciales."""
         self.logger = logging.getLogger("WorldState")
         self.config = config
         self.width = width
@@ -134,8 +136,9 @@ class WorldState:
             madre = self.get_person(mother_id)
             padre = self.get_person(father_id) if father_id else None
             
-            if madre: madre.add_child()
-            if padre: padre.add_child()
+            # Incrementar el fitness evolutivo de los padres biológicos
+            if madre: madre.add_biological_child()
+            if padre: padre.add_biological_child()
             
             if event_bus:
                 gender = getattr(newborn, 'gender', 'indefinido')
@@ -148,11 +151,23 @@ class WorldState:
             parent_b = self.get_person(adoption["parent_b"]) if adoption["parent_b"] else None
 
             if child and parent_a:
+                # Se asigna la paternidad legal (adoptiva) preservando el linaje biológico
                 parent_a.add_child()
-                if parent_b: parent_b.add_child()
-                child.set_parents(parent_a.entity_id, parent_b.entity_id if parent_b else None)
+                child.add_adoptive_parent(parent_a.entity_id)
+                
+                if parent_b: 
+                    parent_b.add_child()
+                    child.add_adoptive_parent(parent_b.entity_id)
+                    
                 if event_bus:
-                    event_bus.publish(AdoptionCompletedEvent(child.entity_id, parent_a.entity_id, getattr(parent_b, 'entity_id', None), current_tick))
+                    event_bus.publish(
+                        AdoptionCompletedEvent(
+                            child.entity_id, 
+                            parent_a.entity_id, 
+                            getattr(parent_b, 'entity_id', None), 
+                            current_tick
+                        )
+                    )
         
         # 6. RELACIONES Y MOVIMIENTOS ESPACIALES
         for entity_id, (new_x, new_y) in pending.movements.items():

@@ -155,7 +155,11 @@ class PhaseScheduler:
                         config=self.config,
                         ancestry_queries=ancestry_queries,
                     ),
-                    AdoptionSystem(self.config),
+                    # Se inyecta la dependencia genealógica para evaluar Kin Selection
+                    AdoptionSystem(
+                        config=self.config,
+                        ancestry_queries=ancestry_queries,
+                    ),
                 ],  # type: ignore[arg-type]
             ),
             PhaseDefinition(

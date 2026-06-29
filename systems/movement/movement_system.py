@@ -5,22 +5,30 @@ Las entidades evalúan su vecindad ponderando recursos, epidemias, hacinamiento 
 vectores de migración a larga distancia.
 """
 
+from __future__ import annotations
+
+import logging
 import math
 import random
-import logging
 from typing import Any
 
-from core.state.world_state import WorldState
-from core.state.pending_changes import PendingChanges
-from systems.environment.environment_context import EnvironmentContext
 from core.config.simulation_config import SimulationConfig
+from core.state.pending_changes import PendingChanges
+from core.state.world_state import WorldState
+from systems.environment.environment_context import EnvironmentContext
+
 
 class MovementSystem:
     """Motor de navegación espacial que evalúa múltiples campos de potencial."""
 
-    def __init__(self, config: SimulationConfig, density_system: Any, relationship_system: Any) -> None:
+    def __init__(
+        self,
+        config: SimulationConfig,
+        density_system: Any,
+        relationship_system: Any,
+    ) -> None:
         """Inicializa el motor de movimiento inteligente.
-        
+
         Args:
             config: Configuración maestra de la simulación.
             density_system: (Deprecado/Opcional) Sistema heredado de densidad.
@@ -31,14 +39,19 @@ class MovementSystem:
         self.relationship_system = relationship_system
         self.logger = logging.getLogger(self.__class__.__name__)
 
-    def process(self, state: WorldState, pending: PendingChanges, 
-                delta_days: float, context: EnvironmentContext) -> None:
+    def process(
+        self,
+        state: WorldState,
+        pending: PendingChanges,
+        delta_days: float,
+        context: EnvironmentContext,
+    ) -> None:
         """Calcula el vector de movimiento óptimo para cada agente vivo."""
         move_cfg = self.config.movement
-        
+
         distance_capacity = move_cfg.base_speed * delta_days
         eval_radius = max(1, int(math.ceil(distance_capacity)))
-        
+
         max_x = state.width - 1
         max_y = state.height - 1
 
@@ -52,7 +65,7 @@ class MovementSystem:
             if social_target and social_target.entity_id in pending.deaths:
                 social_target = None
 
-            best_score = -float('inf')
+            best_score = -float("inf")
             best_x, best_y = person.x, person.y
 
             # 3. ESCANEO DEL CAMPO DE POTENCIAL (Utility AI)
@@ -63,14 +76,17 @@ class MovementSystem:
                         continue
 
                     nx, ny = person.x + dx, person.y + dy
-                    
+
                     if not (0 <= nx <= max_x and 0 <= ny <= max_y):
                         continue
 
                     score = self._evaluate_cell_utility(
-                        person=person, x=nx, y=ny, 
-                        state=state, context=context, 
-                        social_target=social_target
+                        person=person,
+                        x=nx,
+                        y=ny,
+                        state=state,
+                        context=context,
+                        social_target=social_target,
                     )
 
                     score += random.uniform(-0.01, 0.01)
@@ -83,27 +99,42 @@ class MovementSystem:
             if best_x != person.x or best_y != person.y:
                 pending.register_movement(person.entity_id, best_x, best_y)
 
-    def _evaluate_cell_utility(self, person: Any, x: int, y: int, 
-                               state: WorldState, context: EnvironmentContext, 
-                               social_target: Any) -> float:
+    def _evaluate_cell_utility(
+        self,
+        person: Any,
+        x: int,
+        y: int,
+        state: WorldState,
+        context: EnvironmentContext,
+        social_target: Any,
+    ) -> float:
         """Calcula matemáticamente la deseabilidad de una coordenada espacial."""
         score = 0.0
-        
+
         # A. RECURSOS Y ENERGÍA
-        energy_deficit = 1.0 - getattr(person, 'emotions', {}).get("energy", 1.0)
-        resources = getattr(context, 'get_resources_at', lambda x, y: 0.5)(x, y)
-        score += (resources * energy_deficit * 10.0)
+        energy_deficit = 1.0 - getattr(person, "emotions", {}).get("energy", 1.0)
+        
+        # Uso seguro para la llamada al mapa de recursos
+        get_resources = getattr(context, "get_resources_at", None)
+        resources = get_resources(x, y) if callable(get_resources) else 0.5
+        
+        score += resources * energy_deficit * 10.0
 
         # B. EPIDEMIOLOGÍA BLINDADA AL 100%
         viral_load = 0.0
-        ep_map = getattr(state, 'epidemiological_map', None)
-        
+        ep_map = getattr(state, "epidemiological_map", None)
+
         if ep_map is not None:
             try:
                 raw_result = None
                 method_executed = False
-                
-                for method_name in ['get_load_at', 'get_viral_load', 'get_load', 'get_density_at']:
+
+                for method_name in [
+                    "get_load_at",
+                    "get_viral_load",
+                    "get_load",
+                    "get_density_at",
+                ]:
                     method = getattr(ep_map, method_name, None)
                     if callable(method):
                         try:
@@ -117,40 +148,44 @@ class MovementSystem:
                                 break
                             except Exception:
                                 continue
-                
+
                 if not method_executed:
-                    matrix = getattr(ep_map, 'matrix', getattr(ep_map, '_cells', None))
+                    matrix = getattr(ep_map, "matrix", getattr(ep_map, "_cells", None))
                     if isinstance(matrix, dict):
                         raw_result = matrix.get((x, y), 0.0)
-                
+
                 if isinstance(raw_result, (int, float)):
                     viral_load = float(raw_result)
             except Exception:
                 viral_load = 0.0
 
-        score -= (viral_load * 15.0)
+        score -= viral_load * 15.0
 
         # C. PRESIÓN AMBIENTAL Y SOBREPOBLACIÓN
         density = context.get_local_pressure(x, y)
-        trauma_crowding = getattr(person, 'memory', {}).get("trauma_overcrowding", 0.0) if isinstance(getattr(person, 'memory', None), dict) else 0.0
+        trauma_crowding = (
+            getattr(person, "memory", {}).get("trauma_overcrowding", 0.0)
+            if isinstance(getattr(person, "memory", None), dict)
+            else 0.0
+        )
         crowding_penalty = 1.0 + (trauma_crowding * 5.0)
-        score -= (density * crowding_penalty)
+        score -= density * crowding_penalty
 
         # D. ANCLAJE SOCIAL
         if social_target:
-            dist_to_target = math.sqrt((social_target.x - x)**2 + (social_target.y - y)**2)
-            score -= (dist_to_target * 2.0)
+            dist_to_target = math.sqrt((social_target.x - x) ** 2 + (social_target.y - y) ** 2)
+            score -= dist_to_target * 2.0
 
         # =================================================================
         # E. VECTOR DE MIGRACIÓN (Nuevo integrador del Punto 14)
         # =================================================================
-        if isinstance(getattr(person, 'memory', None), dict):
+        if isinstance(getattr(person, "memory", None), dict):
             migration_target = person.memory.get("migration_target")
             if migration_target is not None:
                 tx, ty = migration_target
-                dist_to_migration = math.sqrt((tx - x)**2 + (ty - y)**2)
+                dist_to_migration = math.sqrt((tx - x) ** 2 + (ty - y) ** 2)
                 # Al restar la distancia, las celdas que acortan el camino ganan muchísimos puntos.
                 # Se pondera x10 para que anule el comportamiento errático de exploración.
-                score -= (dist_to_migration * 10.0) 
-            
+                score -= dist_to_migration * 10.0
+
         return score

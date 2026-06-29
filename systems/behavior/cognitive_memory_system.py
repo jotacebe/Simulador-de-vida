@@ -54,6 +54,19 @@ class CognitiveMemorySystem:
             if getattr(person, 'is_sick', False):
                 trauma_sickness += (cog_cfg.sickness_impact * delta_days)
 
+            # NUEVO: Decaimiento del trauma por adopción y proceso de adaptación emocional
+            old_trauma_adoption = mem.get("trauma_adoption", 0.0)
+            trauma_adoption = old_trauma_adoption * decay_factor
+            
+            # Si el menor tiene un trauma de adopción activo, aliviamos las emociones
+            # de forma proporcional a la fracción de trauma disipada en este tick
+            if old_trauma_adoption > 0.0:
+                delta_trauma = old_trauma_adoption - trauma_adoption
+                if hasattr(person, 'emotions') and isinstance(person.emotions, dict):
+                    # El estrés remite y la felicidad se recupera paulatinamente
+                    person.emotions["stress"] = max(0.0, person.emotions.get("stress", 0.0) - delta_trauma * 0.6)
+                    person.emotions["happiness"] = min(1.0, person.emotions.get("happiness", 0.5) + delta_trauma * 0.5)
+
             preferred_sector = mem.get("preferred_sector", None)
             is_adult = getattr(person, 'is_adult', False)
             is_sick = getattr(person, 'is_sick', False)
@@ -64,6 +77,7 @@ class CognitiveMemorySystem:
 
             mem["trauma_overcrowding"] = min(cog_cfg.max_trauma_cap, trauma_overcrowding)
             mem["trauma_sickness"] = min(cog_cfg.max_trauma_cap, trauma_sickness)
+            mem["trauma_adoption"] = min(cog_cfg.max_trauma_cap, trauma_adoption)  # NUEVO
             mem["rebellion_cooldown"] = max(0.0, mem.get("rebellion_cooldown", 0.0) - delta_days)
             mem["preferred_sector"] = preferred_sector
 
@@ -93,7 +107,7 @@ class CognitiveMemorySystem:
             for k in keys_to_delete:
                 del episodic[k]
 
-            # El estrés cognitivo afecta al Libre Albedrío (Punto 11)
+            # El estrés cognitivo afecta al Libre Albedrío
             trauma_penalty = min(0.8, total_trauma_episodic * 0.15)
             nostalgia_buff = min(0.5, total_nostalgia * 0.1)
             mem["cognitive_stress"] = max(0.0, trauma_penalty - nostalgia_buff)
