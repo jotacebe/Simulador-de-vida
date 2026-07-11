@@ -4,6 +4,13 @@ Responsabilidad:
 Mantener la fuente de verdad de las entidades físicas. Extrae los datos del 
 búfer transaccional ('pending') y los consolida alterando los objetos en memoria 
 una vez por ciclo. Dispara eventos para la interfaz o métricas.
+
+Integra con el sistema de memoria cognitiva para:
+- Detectar muertes y generar recuerdos de duelo para familiares/amigos
+- Registrar nacimientos y crear recuerdos para los padres
+
+NOTA: La importación de CognitiveMemorySystem se hace localmente en los métodos
+para evitar dependencias circulares.
 """
 
 import logging
@@ -62,25 +69,25 @@ class WorldState:
         """Retorna un volcado instantáneo de todos los agentes vivos."""
         return list(self.persons.values())
 
-    def apply_commit(self, pending: Any, event_bus: Any = None, current_tick: int = 0) -> None:
-        """Aplica los cambios del búfer de forma atómica (Fase de Consolidación).
+    def apply_commit(
+        self, pending: Any, event_bus: Any = None, current_tick: int = 0
+    ) -> None:
+        """Aplica los cambios del búfer de forma atómica (Fase de Consolidación)."""
         
-        Orden de ejecución crítico para prevenir corrupción:
-        1. Muertes (Liberación de memoria y referencias).
-        2. Envejecimiento (Desgaste celular).
-        3. Salud Médica (Infecciones virales y recuperación).
-        4. Fisiología Reproductiva (Nacimientos y Embarazos).
-        5. Reestructuración legal (Adopciones, Rupturas, Matrimonios).
-        6. Físicas Espaciales (Desplazamientos).
-        """
+        # 1. MUERTES
+        current_day = self.world_days_elapsed
         
-        # 1. MUERTES: Eliminamos la referencia física primero para liberar memoria
         for entity_id, reason in pending.deaths.items():
             if entity_id in self.persons:
                 p = self.persons.pop(entity_id)
+                
+                # Generar recuerdos de duelo
+                self._generate_grief_memories(entity_id, p, current_day, pending)
+                
                 if event_bus:
-                    # 'reason' ahora incluye el diagnóstico forense detallado del MortalitySystem
-                    event_bus.publish(PersonDiedEvent(entity_id, int(p.age), reason, current_tick))
+                    event_bus.publish(
+                        PersonDiedEvent(entity_id, int(p.age), reason, current_tick)
+                    )
 
         # 2. ENVEJECIMIENTO FÍSICO
         for entity_id, days in pending.age_increments.items():
@@ -88,7 +95,7 @@ class WorldState:
             if person:
                 person.add_age(days)
 
-        # 3. SALUD MÉDICA AVANZADA (Contagios con Pathogens y Recuperaciones)
+        # 3. SALUD MÉDICA AVANZADA
         for entity_id, pathogen in pending.infections:
             p = self.get_person(entity_id)
             if p:
@@ -106,9 +113,8 @@ class WorldState:
                 madre.update_pregnancy(
                     data["is_pregnant"], 
                     data.get("pregnancy_days", 0.0),
-                    data.get("litter_size", 1)
+                    data.get("litter_size", 1),
                 )
-                # Gestión de abortos por estrés
                 if data.get("failed_increment", 0) > 0:
                     for _ in range(data["failed_increment"]):  
                         madre.add_failed_pregnancy()
@@ -117,7 +123,6 @@ class WorldState:
             new_id = self.get_next_entity_id()
             baby_genome = data.get("genome")
             
-            # Instanciación con inyección multiespecie extraída del genoma
             newborn = Person(
                 config=self.config,
                 entity_id=new_id, 
@@ -125,7 +130,7 @@ class WorldState:
                 y=data["y"], 
                 age=0.0, 
                 genome=baby_genome,
-                species=getattr(baby_genome, 'species_baseline', 'human')
+                species=getattr(baby_genome, 'species_baseline', 'human'),
             )
             
             mother_id = data["mother_id"]
@@ -136,22 +141,36 @@ class WorldState:
             madre = self.get_person(mother_id)
             padre = self.get_person(father_id) if father_id else None
             
-            # Incrementar el fitness evolutivo de los padres biológicos
-            if madre: madre.add_biological_child()
-            if padre: padre.add_biological_child()
+            if madre:
+                madre.add_biological_child()
+            if padre:
+                padre.add_biological_child()
+            
+            # Registrar recuerdos del nacimiento
+            self._register_birth_memories(new_id, madre, padre, current_day, pending)
             
             if event_bus:
                 gender = getattr(newborn, 'gender', 'indefinido')
-                event_bus.publish(PersonBornEvent(new_id, mother_id, father_id, data["x"], data["y"], gender, current_tick))
+                event_bus.publish(
+                    PersonBornEvent(
+                        new_id, mother_id, father_id, data["x"], data["y"],
+                        gender, current_tick,
+                    )
+                )
 
         # 5. ADOPCIONES LEGALES
         for adoption in pending.adoptions:
             child = self.get_person(adoption["child_id"])
             parent_a = self.get_person(adoption["parent_a"])
-            parent_b = self.get_person(adoption["parent_b"]) if adoption["parent_b"] else None
+            parent_b = (
+                self.get_person(adoption["parent_b"])
+                if adoption["parent_b"]
+                else None
+            )
+            
+            is_single_parent = adoption.get("is_single_parent", False)
 
             if child and parent_a:
-                # Se asigna la paternidad legal (adoptiva) preservando el linaje biológico
                 parent_a.add_child()
                 child.add_adoptive_parent(parent_a.entity_id)
                 
@@ -165,7 +184,8 @@ class WorldState:
                             child.entity_id, 
                             parent_a.entity_id, 
                             getattr(parent_b, 'entity_id', None), 
-                            current_tick
+                            current_tick,
+                            is_single_parent,
                         )
                     )
         
@@ -175,18 +195,20 @@ class WorldState:
             if p:
                 p.set_position(new_x, new_y)
 
-        # Resolución simétrica de Divorcios y Viudedad
         for p_a_id, p_b_id in pending.divorces:
             pa = self.get_person(p_a_id)
             pb = self.get_person(p_b_id)
             
-            if pa and pa.partner_id == p_b_id: pa.register_divorce()
-            if pb and pb.partner_id == p_a_id: pb.register_divorce()
+            if pa and pa.partner_id == p_b_id:
+                pa.register_divorce()
+            if pb and pb.partner_id == p_a_id:
+                pb.register_divorce()
             
             if event_bus: 
-                event_bus.publish(DivorceOccurredEvent(p_a_id, p_b_id, "separacion_natural", current_tick))
+                event_bus.publish(
+                    DivorceOccurredEvent(p_a_id, p_b_id, "separacion_natural", current_tick)
+                )
 
-        # Resolución simétrica de Matrimonios (Garantiza integridad del grafo bidireccional)
         for p_a_id, p_b_id in pending.marriages.items():
             pa = self.get_person(p_a_id)
             pb = self.get_person(p_b_id)
@@ -197,3 +219,160 @@ class WorldState:
                 
                 if event_bus and p_a_id < p_b_id:
                     event_bus.publish(MarriageCreatedEvent(p_a_id, p_b_id, current_tick))
+
+        # 7. PSICOLOGÍA TRANSACCIONAL
+        # 7a. Actualizaciones de memoria
+        for entity_id, memory_changes in pending.memory_updates.items():
+            person = self.get_person(entity_id)
+            if person:
+                for key, value in memory_changes.items():
+                    person.memory[key] = value
+
+        # 7b. Actualizaciones de emociones
+        for entity_id, emotion_changes in pending.emotion_updates.items():
+            person = self.get_person(entity_id)
+            if person:
+                for emotion_name, amount in emotion_changes:
+                    person.update_emotion(emotion_name, amount)
+
+        # 7c. Actualizaciones de flags de libre albedrío
+        for entity_id, flag_changes in pending.free_will_flags_updates.items():
+            person = self.get_person(entity_id)
+            if person:
+                if "free_will_flags" not in person.memory or not isinstance(person.memory["free_will_flags"], dict):
+                    person.memory["free_will_flags"] = {}
+                
+                for flag_name, flag_value in flag_changes.items():
+                    person.memory["free_will_flags"][flag_name] = flag_value
+        
+        # =====================================================================
+        # 7d. NUEVO: Actualizaciones de motivaciones continuas
+        # =====================================================================
+        for entity_id, motivation_changes in pending.motivation_updates.items():
+            person = self.get_person(entity_id)
+            if person and hasattr(person, '_motivations'):
+                for key, value in motivation_changes.items():
+                    # Detectar si es un set absoluto (prefijo __set__)
+                    if key.startswith("__set__"):
+                        motivation_name = key[7:]  # Quitar prefijo "__set__"
+                        if motivation_name in person._motivations:
+                            person._motivations[motivation_name] = max(0.0, min(1.0, value))
+                    else:
+                        # Es un delta acumulativo
+                        if key in person._motivations:
+                            new_value = person._motivations[key] + value
+                            person._motivations[key] = max(0.0, min(1.0, new_value))
+
+    # =====================================================================
+    # MÉTODOS AUXILIARES PARA GENERAR RECUERDOS
+    # =====================================================================
+    
+    def _generate_grief_memories(
+        self,
+        deceased_id: int,
+        deceased: Person,
+        current_day: float,
+        pending: Any,
+    ) -> None:
+        """Genera recuerdos de duelo para personas que tenían relación con el fallecido.
+        
+        IMPORTACIÓN LOCAL: Se importa CognitiveMemorySystem aquí para evitar
+        dependencia circular con world_state.
+        """
+        # Importación local para evitar dependencia circular
+        from systems.behavior.cognitive_memory_system import CognitiveMemorySystem
+        
+        for person in self.get_all_persons():
+            if person.entity_id == deceased_id:
+                continue
+            
+            if not hasattr(person, 'memory') or not isinstance(person.memory, dict):
+                continue
+            
+            episodic = person.memory.get("episodic", {})
+            if not isinstance(episodic, dict):
+                continue
+            
+            for mem_type in [
+                CognitiveMemorySystem.TYPE_COMPANION,
+                CognitiveMemorySystem.TYPE_MARRIAGE,
+                CognitiveMemorySystem.TYPE_CHILD,
+                CognitiveMemorySystem.TYPE_CONFLICT,
+                CognitiveMemorySystem.TYPE_EXPERIENCE,
+            ]:
+                key = f"{mem_type}_{deceased_id}"
+                if key in episodic:
+                    existing_memory = episodic[key]
+                    relationship_intensity = existing_memory.get('intensity', 0.5)
+                    grief_intensity = min(1.0, relationship_intensity * 1.2)
+                    
+                    CognitiveMemorySystem.add_memory(
+                        person=person,
+                        mem_type=CognitiveMemorySystem.TYPE_DEATH,
+                        target_id=str(deceased_id),
+                        intensity=grief_intensity,
+                        valence=-1,
+                        context="duelo",
+                        current_day=current_day,
+                        pending=pending,
+                    )
+                    
+                    self.logger.debug(
+                        "🕊️ Duelo generado: Agente %s recuerda muerte de %s (intensidad: %.2f)",
+                        person.entity_id,
+                        deceased_id,
+                        grief_intensity,
+                    )
+                    break
+
+    def _register_birth_memories(
+        self,
+        newborn_id: int,
+        mother: Optional[Person],
+        father: Optional[Person],
+        current_day: float,
+        pending: Any,
+    ) -> None:
+        """Registra recuerdos del nacimiento para los padres.
+        
+        IMPORTACIÓN LOCAL: Se importa CognitiveMemorySystem aquí para evitar
+        dependencia circular con world_state.
+        """
+        # Importación local para evitar dependencia circular
+        from systems.behavior.cognitive_memory_system import CognitiveMemorySystem
+        
+        if mother is not None:
+            CognitiveMemorySystem.add_memory(
+                person=mother,
+                mem_type=CognitiveMemorySystem.TYPE_CHILD,
+                target_id=str(newborn_id),
+                intensity=1.0,
+                valence=1,
+                context="nacimiento",
+                current_day=current_day,
+                pending=pending,
+            )
+            
+            self.logger.debug(
+                "👶 Madre %s recuerda nacimiento de hijo %s",
+                mother.entity_id,
+                newborn_id,
+            )
+        
+        if father is not None:
+            CognitiveMemorySystem.add_memory(
+                person=father,
+                mem_type=CognitiveMemorySystem.TYPE_CHILD,
+                target_id=str(newborn_id),
+                intensity=0.9,
+                valence=1,
+                context="nacimiento",
+                current_day=current_day,
+                pending=pending,
+            )
+            
+            self.logger.debug(
+                "👶 Padre %s recuerda nacimiento de hijo %s",
+                father.entity_id,
+                newborn_id,
+            )

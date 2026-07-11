@@ -1,100 +1,439 @@
-"""Módulo de Libre Albedrío implementado como un Sistema de Desviación Estocástica.
+"""Módulo de Libre Albedrío implementado como Sistema de Motivaciones Continuas.
 
-Modifica el comportamiento basal de los habitantes inyectando impulsos anómalos
-y decisiones rebeldes que rompen las restricciones normativas de la simulación.
+Este sistema reemplaza las antiguas banderas binarias por un modelo de motivaciones
+continuas que evolucionan según:
+- Genética del agente (impulsividad, curiosidad, obediencia, agresividad)
+- Estado emocional (estrés, felicidad, energía)
+- Experiencias previas (aprendizaje por éxito/fracaso)
+- Entorno (presión ambiental, hacinamiento)
+- Memoria episódica (recuerdos de eventos pasados)
+- Enfermedades (estado de salud)
+- Edad y etapa vital
+
+Las motivaciones compiten entre sí y la más fuerte (si supera un umbral)
+desencadena la acción correspondiente. Esto genera comportamiento emergente
+y verdaderamente orgánico, no aleatorio.
+
+Sistema de cooldown y consumo de motivación para evitar bucles.
+CORRECCIÓN: Consumo de motivación incluso durante cooldown para evitar bucles.
+
+Todos los cambios se registran en el búfer transaccional y se aplican
+atómicamente durante el commit, garantizando coherencia del estado.
 """
 
-import random
+from __future__ import annotations
+
 import logging
-from typing import Any, Dict
-from core.state.world_state import WorldState
-from core.state.pending_changes import PendingChanges
-from systems.environment.environment_context import EnvironmentContext
+import math
+import random
+from typing import Any, Dict, Optional, Tuple
+
 from core.config.simulation_config import SimulationConfig
+from core.state.pending_changes import PendingChanges
+from core.state.world_state import WorldState
+from systems.behavior.cognitive_memory_system import CognitiveMemorySystem
+from systems.environment.environment_context import EnvironmentContext
+
 
 class FreeWillSystem:
-    """Sistema que gestiona impulsos rebeldes y desviaciones normativas de los agentes."""
-
-    # Identificadores de impulsos anómalos
-    FLAG_TABOO_RELATION = "allow_taboo_relation"   
-    FLAG_EARLY_LEAVE = "runaway_impulse"           
-    FLAG_OUT_OF_WEDLOCK = "ignore_marriage_norm"   
-    FLAG_SINGLE_PARENT = "monoparental_drive"       
-    FLAG_UNEXPECTED_MIGRATION = "erratic_explorer"  
+    """Sistema de motivaciones continuas para comportamiento emergente."""
 
     def __init__(self, config: SimulationConfig) -> None:
+        """Inicializa el sistema vinculándolo a la configuración centralizada."""
         self.config = config
         self.logger = logging.getLogger(self.__class__.__name__)
-        self.base_anomaly_chance = 0.015
+        
+        # Registro de cooldowns {entity_id: {motivation_name: last_action_day}}
+        self._action_cooldowns: Dict[int, Dict[str, float]] = {}
 
-    def process(self, state: WorldState, pending: PendingChanges, 
-                delta_days: float, context: EnvironmentContext) -> None:
+    def process(
+        self,
+        state: WorldState,
+        pending: PendingChanges,
+        delta_days: float,
+        context: EnvironmentContext,
+    ) -> None:
+        """Procesa la evolución de motivaciones y decisiones de todos los agentes."""
+        fw_cfg = self.config.free_will
+        current_day = getattr(state, 'world_days_elapsed', 0.0)
         
         for person in state.get_all_persons():
             if person.entity_id in pending.deaths:
+                # Limpiar cooldowns de agentes muertos
+                self._action_cooldowns.pop(person.entity_id, None)
                 continue
-
-            # ==========================================================
-            # BLINDAJE: USAMOS EL DICCIONARIO NATIVO 'MEMORY'
-            # ==========================================================
-            # Usamos person.memory, que sabemos 100% que existe y es un dict
-            memory_dict = person.memory
             
-            flags = memory_dict.get("free_will_flags")
+            # Verificar que la persona tenga el sistema de motivaciones
+            if not hasattr(person, '_motivations'):
+                continue
             
-            # Inicializamos dentro de memory si no existe
-            if not isinstance(flags, dict):
-                flags = {
-                    self.FLAG_TABOO_RELATION: False,
-                    self.FLAG_EARLY_LEAVE: False,
-                    self.FLAG_OUT_OF_WEDLOCK: False,
-                    self.FLAG_SINGLE_PARENT: False,
-                    self.FLAG_UNEXPECTED_MIGRATION: False
-                }
-                memory_dict["free_will_flags"] = flags
-
-            # Asegurar claves requeridas
-            for default_flag in [self.FLAG_TABOO_RELATION, self.FLAG_EARLY_LEAVE, 
-                                 self.FLAG_OUT_OF_WEDLOCK, self.FLAG_SINGLE_PARENT, 
-                                 self.FLAG_UNEXPECTED_MIGRATION]:
-                if default_flag not in flags:
-                    flags[default_flag] = False
-
-            # ==========================================================
-            # PRIORIZACIÓN DINÁMICA DE ANOMALÍAS
-            # ==========================================================
-            energy = person.emotions.get("energy", 1.0) if hasattr(person, 'emotions') else 1.0
-            trauma = person.memory.get("trauma_overcrowding", 0.0)
-            local_pressure = context.get_local_pressure(person.x, person.y)
+            # =================================================================
+            # PASO 1: DECAIMIENTO NATURAL DE MOTIVACIONES
+            # =================================================================
+            if hasattr(person, 'decay_motivations'):
+                person.decay_motivations(delta_days, fw_cfg.motivation_decay_rate)
             
-            stress_multiplier = 1.0 + ((1.0 - energy) * 2.0) + (trauma * 3.0) + (local_pressure - 1.0)
-            dynamic_chance = self.base_anomaly_chance * max(1.0, stress_multiplier)
-
-            # ==========================================================
-            # TIRADA DE DADOS ESTOCÁSTICA (ESCRITURA SEGURA)
-            # ==========================================================
+            # =================================================================
+            # PASO 2-7: CALCULAR Y APLICAR AJUSTES
+            # =================================================================
+            genetic_motivations = self._calculate_genetic_motivations(person, fw_cfg)
+            emotional_adjustments = self._calculate_emotional_adjustments(person, fw_cfg)
+            environmental_adjustments = self._calculate_environmental_adjustments(
+                person, context, fw_cfg
+            )
+            memory_adjustments = self._calculate_memory_adjustments(person, fw_cfg)
+            sickness_adjustments = self._calculate_sickness_adjustments(person, fw_cfg)
+            age_adjustments = self._calculate_age_adjustments(person, fw_cfg)
             
-            if random.random() < (dynamic_chance * 0.5):
-                flags[self.FLAG_TABOO_RELATION] = True
+            # =================================================================
+            # PASO 8: COMBINAR TODOS LOS AJUSTES
+            # =================================================================
+            for motivation_name in fw_cfg.motivations:
+                base = genetic_motivations.get(motivation_name, 0.3)
+                
+                adjustment = (
+                    emotional_adjustments.get(motivation_name, 0.0) +
+                    environmental_adjustments.get(motivation_name, 0.0) +
+                    memory_adjustments.get(motivation_name, 0.0) +
+                    sickness_adjustments.get(motivation_name, 0.0) +
+                    age_adjustments.get(motivation_name, 0.0)
+                )
+                
+                target_value = max(0.0, min(1.0, base + adjustment))
+                current_value = person.get_motivation(motivation_name)
+                delta = target_value - current_value
+                
+                if abs(delta) > 0.01:
+                    pending.register_motivation_update(
+                        person.entity_id, motivation_name, delta
+                    )
             
-            age = getattr(person, 'age', 0)
-            if 10 <= age < 18:
-                home_stress = dynamic_chance * (2.0 if trauma > 0.5 else 1.0)
-                if random.random() < home_stress:
-                    flags[self.FLAG_EARLY_LEAVE] = True
+            # =================================================================
+            # PASO 9: DETECTAR MOTIVACIÓN DOMINANTE Y POSIBLE ACCIÓN
+            # =================================================================
+            dominant_motivation, dominant_value = self._get_dominant_motivation(
+                person, fw_cfg
+            )
+            
+            action_threshold = self._get_action_threshold(dominant_motivation, fw_cfg)
+            
+            # Si la motivación dominante supera el umbral
+            if dominant_value >= action_threshold:
+                # Verificar cooldown antes de registrar acción
+                can_trigger = self._can_trigger_action(
+                    person.entity_id, dominant_motivation, current_day, fw_cfg
+                )
+                
+                if can_trigger:
+                    self.logger.debug(
+                        "🎯 Agente %s: motivación dominante '%s' (%.2f) supera umbral",
+                        person.entity_id,
+                        dominant_motivation,
+                        dominant_value,
+                    )
+                    
+                    # Registrar la acción en el búfer transaccional
+                    pending.register_memory_update(
+                        person.entity_id,
+                        "dominant_action",
+                        {
+                            "motivation": dominant_motivation,
+                            "intensity": dominant_value,
+                            "tick": current_day,
+                        }
+                    )
+                    
+                    # Registrar que se ejecutó esta acción (cooldown)
+                    self._register_action(person.entity_id, dominant_motivation, current_day)
+                    
+                    # Consumir parte de la motivación para evitar bucles
+                    consumption = self._get_motivation_consumption(dominant_motivation, fw_cfg)
+                    if consumption > 0:
+                        pending.register_motivation_update(
+                            person.entity_id,
+                            dominant_motivation,
+                            -consumption
+                        )
+                else:
+                    # CORRECCIÓN: Si está en cooldown, consumir la motivación de todas formas
+                    # para evitar que se quede en bucle (consumo doble)
+                    consumption = self._get_motivation_consumption(dominant_motivation, fw_cfg) * 2.0
+                    if consumption > 0:
+                        pending.register_motivation_update(
+                            person.entity_id,
+                            dominant_motivation,
+                            -consumption
+                        )
 
-            if random.random() < dynamic_chance:
-                flags[self.FLAG_OUT_OF_WEDLOCK] = True
+    def _can_trigger_action(
+        self,
+        entity_id: int,
+        motivation_name: str,
+        current_day: float,
+        fw_cfg: Any,
+    ) -> bool:
+        """Verifica si una acción puede ser desencadenada (respeta cooldown)."""
+        if entity_id not in self._action_cooldowns:
+            return True
+        
+        cooldowns = self._action_cooldowns[entity_id]
+        if motivation_name not in cooldowns:
+            return True
+        
+        last_action_day = cooldowns[motivation_name]
+        days_since_last = current_day - last_action_day
+        
+        cooldown_days = self._get_action_cooldown(motivation_name, fw_cfg)
+        
+        return days_since_last >= cooldown_days
 
-            if random.random() < (dynamic_chance * 1.2):
-                flags[self.FLAG_SINGLE_PARENT] = True
+    def _register_action(
+        self,
+        entity_id: int,
+        motivation_name: str,
+        current_day: float,
+    ) -> None:
+        """Registra que se ejecutó una acción (para cooldown)."""
+        if entity_id not in self._action_cooldowns:
+            self._action_cooldowns[entity_id] = {}
+        
+        self._action_cooldowns[entity_id][motivation_name] = current_day
 
-            if random.random() < (dynamic_chance * 0.8):
-                flags[self.FLAG_UNEXPECTED_MIGRATION] = True
+    def _get_action_cooldown(self, motivation_name: str, fw_cfg: Any) -> float:
+        """Obtiene el cooldown en días para una motivación específica."""
+        cooldowns = {
+            "independence": 30.0,
+            "exploration": 15.0,
+            "rebellion": 60.0,
+            "partnership": 30.0,
+            "protection": 7.0,       # 1 semana (más frecuente)
+            "migration": 90.0,
+            "cooperation": 15.0,
+        }
+        return cooldowns.get(motivation_name, 30.0)
+
+    def _get_motivation_consumption(self, motivation_name: str, fw_cfg: Any) -> float:
+        """Obtiene cuánto se consume la motivación al ejecutar una acción."""
+        consumptions = {
+            "independence": 0.2,
+            "exploration": 0.15,
+            "rebellion": 0.25,
+            "partnership": 0.2,
+            "protection": 0.15,      # CORRECCIÓN: Aumentado de 0.1 a 0.15
+            "migration": 0.3,
+            "cooperation": 0.15,
+        }
+        return consumptions.get(motivation_name, 0.2)
+
+    def _calculate_genetic_motivations(
+        self, person: Any, fw_cfg: Any
+    ) -> Dict[str, float]:
+        """Calcula las motivaciones base según la genética del agente."""
+        genome = person.genome
+        
+        impulsivity = min(1.0, genome.impulsivity / 2.0)
+        curiosity = min(1.0, genome.curiosity / 2.0)
+        obedience = min(1.0, genome.obedience / 2.0)
+        aggressiveness = min(1.0, genome.aggressiveness / 2.0)
+        temperament = min(1.0, genome.temperament / 2.0)
+        sociability = min(1.0, genome.sociability / 2.0)
+        
+        motivations = {
+            "independence": (
+                impulsivity * fw_cfg.impulsivity_weight +
+                aggressiveness * fw_cfg.aggressiveness_weight * 0.5 +
+                (1.0 - obedience) * fw_cfg.obedience_weight * 0.5
+            ),
+            "exploration": (
+                curiosity * fw_cfg.curiosity_weight +
+                impulsivity * fw_cfg.impulsivity_weight * 0.3
+            ),
+            "rebellion": (
+                aggressiveness * fw_cfg.aggressiveness_weight +
+                impulsivity * fw_cfg.impulsivity_weight * 0.5 +
+                (1.0 - obedience) * fw_cfg.obedience_weight
+            ),
+            "partnership": (
+                sociability * fw_cfg.sociability_weight +
+                temperament * fw_cfg.temperament_weight * 0.5
+            ),
+            "protection": (
+                temperament * fw_cfg.temperament_weight +
+                (1.0 - impulsivity) * fw_cfg.impulsivity_weight * 0.3
+            ),
+            "migration": (
+                curiosity * fw_cfg.curiosity_weight +
+                impulsivity * fw_cfg.impulsivity_weight * 0.4
+            ),
+            "cooperation": (
+                sociability * fw_cfg.sociability_weight +
+                obedience * fw_cfg.obedience_weight +
+                temperament * fw_cfg.temperament_weight * 0.3
+            ),
+        }
+        
+        return motivations
+
+    def _calculate_emotional_adjustments(
+        self, person: Any, fw_cfg: Any
+    ) -> Dict[str, float]:
+        """Calcula ajustes a las motivaciones según el estado emocional."""
+        emotions = person.emotions
+        stress = emotions.get("stress", 0.0)
+        happiness = emotions.get("happiness", 0.5)
+        energy = emotions.get("energy", 1.0)
+        
+        adjustments = {
+            "independence": stress * fw_cfg.stress_weight * 0.5,
+            "exploration": (happiness - 0.5) * fw_cfg.happiness_weight * 0.3,
+            "rebellion": stress * fw_cfg.stress_weight,
+            "partnership": (happiness - 0.5) * fw_cfg.happiness_weight,
+            "protection": (1.0 - happiness) * fw_cfg.happiness_weight * 0.5,
+            "migration": stress * fw_cfg.stress_weight * 0.7,
+            "cooperation": (happiness - 0.5) * fw_cfg.happiness_weight * 0.5,
+        }
+        
+        energy_factor = energy * fw_cfg.energy_weight
+        for motivation in adjustments:
+            adjustments[motivation] *= energy_factor
+        
+        return adjustments
+
+    def _calculate_environmental_adjustments(
+        self, person: Any, context: EnvironmentContext, fw_cfg: Any
+    ) -> Dict[str, float]:
+        """Calcula ajustes a las motivaciones según el entorno."""
+        pressure = context.get_local_pressure(person.x, person.y)
+        
+        excess_pressure = max(0.0, pressure - 1.0)
+        
+        adjustments = {
+            "independence": excess_pressure * fw_cfg.crowding_weight,
+            "exploration": 0.0,
+            "rebellion": excess_pressure * fw_cfg.pressure_weight * 0.5,
+            "partnership": -excess_pressure * fw_cfg.pressure_weight * 0.3,
+            "protection": excess_pressure * fw_cfg.pressure_weight * 0.3,
+            "migration": excess_pressure * fw_cfg.pressure_weight,
+            "cooperation": -excess_pressure * fw_cfg.pressure_weight * 0.2,
+        }
+        
+        return adjustments
+
+    def _calculate_memory_adjustments(
+        self, person: Any, fw_cfg: Any
+    ) -> Dict[str, float]:
+        """Calcula ajustes a las motivaciones según la memoria episódica."""
+        adjustments = {mot: 0.0 for mot in fw_cfg.motivations}
+        
+        if not hasattr(person, 'memory') or not isinstance(person.memory, dict):
+            return adjustments
+        
+        episodic = person.memory.get("episodic", {})
+        if not isinstance(episodic, dict):
+            return adjustments
+        
+        for key, mem in episodic.items():
+            intensity = mem.get('intensity', 0.0)
+            valence = mem.get('valence', 0)
+            
+            if key.startswith("migration_") and valence > 0:
+                adjustments["migration"] += intensity * fw_cfg.episodic_memory_factor
+            
+            if key.startswith("conflict_"):
+                if valence < 0:
+                    adjustments["rebellion"] += intensity * fw_cfg.episodic_memory_factor * 0.5
+                    adjustments["cooperation"] -= intensity * fw_cfg.episodic_memory_factor * 0.3
+                else:
+                    adjustments["cooperation"] += intensity * fw_cfg.episodic_memory_factor * 0.3
+            
+            if key.startswith("marriage_") or key.startswith("companion_"):
+                if valence > 0:
+                    adjustments["partnership"] += intensity * fw_cfg.episodic_memory_factor
+                else:
+                    adjustments["partnership"] -= intensity * fw_cfg.episodic_memory_factor * 0.5
+            
+            if key.startswith("adoption_") and valence > 0:
+                adjustments["protection"] += intensity * fw_cfg.episodic_memory_factor * 0.5
+                adjustments["cooperation"] += intensity * fw_cfg.episodic_memory_factor * 0.3
+        
+        return adjustments
+
+    def _calculate_sickness_adjustments(
+        self, person: Any, fw_cfg: Any
+    ) -> Dict[str, float]:
+        """Calcula ajustes a las motivaciones según el estado de salud."""
+        adjustments = {mot: 0.0 for mot in fw_cfg.motivations}
+        
+        if not getattr(person, 'is_sick', False):
+            return adjustments
+        
+        sickness_factor = min(1.0, len(person.active_infections) * 0.3)
+        
+        adjustments = {
+            "independence": -sickness_factor * fw_cfg.sickness_factor,
+            "exploration": -sickness_factor * fw_cfg.sickness_factor,
+            "rebellion": -sickness_factor * fw_cfg.sickness_factor * 0.5,
+            "partnership": sickness_factor * fw_cfg.sickness_factor * 0.3,
+            "protection": sickness_factor * fw_cfg.sickness_factor,
+            "migration": -sickness_factor * fw_cfg.sickness_factor,
+            "cooperation": sickness_factor * fw_cfg.sickness_factor * 0.5,
+        }
+        
+        return adjustments
+
+    def _calculate_age_adjustments(
+        self, person: Any, fw_cfg: Any
+    ) -> Dict[str, float]:
+        """Calcula ajustes a las motivaciones según la edad y etapa vital."""
+        adjustments = {mot: 0.0 for mot in fw_cfg.motivations}
+        age = getattr(person, 'age', 0)
+        
+        if fw_cfg.adolescence_start_days <= age < fw_cfg.adolescence_end_days:
+            adjustments["independence"] = 0.3
+            adjustments["rebellion"] = 0.3
+            adjustments["exploration"] = 0.2
+        
+        elif fw_cfg.adolescence_end_days <= age < 10950.0:
+            adjustments["partnership"] = 0.2
+        
+        if getattr(person, 'children_count', 0) > 0:
+            adjustments["protection"] = 0.3
+        
+        if getattr(person, 'is_senior', False):
+            adjustments["exploration"] = -0.2
+            adjustments["migration"] = -0.3
+            adjustments["protection"] = 0.2
+        
+        return adjustments
+
+    def _get_dominant_motivation(
+        self, person: Any, fw_cfg: Any
+    ) -> Tuple[str, float]:
+        """Obtiene la motivación dominante después de aplicar inhibición."""
+        if not hasattr(person, '_motivations') or not person._motivations:
+            return ('none', 0.0)
+        
+        max_motivation = max(person._motivations.items(), key=lambda x: x[1])
+        max_name, max_value = max_motivation
+        
+        inhibited_motivations = {}
+        for name, value in person._motivations.items():
+            if name == max_name:
+                inhibited_motivations[name] = value
+            else:
+                inhibition = max_value * fw_cfg.inhibition_factor
+                inhibited_motivations[name] = max(0.0, value - inhibition)
+        
+        return (max_name, max_value)
+
+    def _get_action_threshold(self, motivation_name: str, fw_cfg: Any) -> float:
+        """Obtiene el umbral de acción para una motivación específica."""
+        threshold_attr = f"{motivation_name}_action_threshold"
+        return getattr(fw_cfg, threshold_attr, fw_cfg.action_threshold)
 
     @staticmethod
     def has_impulse(person: Any, flag_name: str) -> bool:
-        """Método utilitario estático para consultar el libre albedrío."""
+        """Método utilitario legacy para consultar el libre albedrío."""
         if not hasattr(person, 'memory') or not isinstance(person.memory, dict):
             return False
         flags = person.memory.get("free_will_flags")
@@ -103,9 +442,16 @@ class FreeWillSystem:
         return flags.get(flag_name, False)
 
     @staticmethod
-    def consume_impulse(person: Any, flag_name: str) -> None:
+    def consume_impulse(
+        person: Any,
+        flag_name: str,
+        pending: Optional[PendingChanges] = None,
+    ) -> None:
         """Apaga el impulso una vez ejecutado para que no se repita en bucle."""
         if hasattr(person, 'memory') and isinstance(person.memory, dict):
             flags = person.memory.get("free_will_flags")
             if isinstance(flags, dict) and flag_name in flags:
                 flags[flag_name] = False
+                
+                if pending is not None:
+                    pending.consume_free_will_flag(person.entity_id, flag_name)

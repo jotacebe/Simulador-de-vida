@@ -87,7 +87,8 @@ class SimulationEngine:
             size=founding_population_size,
         )
 
-        scheduler = PhaseScheduler(config)
+        # Se inyecta el event_bus al scheduler para que lo pase a los sistemas que lo necesiten
+        scheduler = PhaseScheduler(config=config, event_bus=event_bus)
         pipeline = ExecutionPipeline(
             config=config,
             phases=scheduler.build_phases(),
@@ -148,6 +149,14 @@ class SimulationEngine:
             self._total_births += len(pending.births)
             self._total_infections += len(pending.infections)
 
+            # =====================================================================
+            # CORRECCIÓN CRÍTICA: Actualizar world_days_elapsed ANTES del commit
+            # =====================================================================
+            # Esto asegura que los recuerdos generados en apply_commit()
+            # (duelos, nacimientos) tengan el día correcto
+            if hasattr(self.state, "world_days_elapsed"):
+                self.state.world_days_elapsed = current_day
+
             # Fase 3: Consolidación atómica
             self.state.apply_commit(
                 pending,
@@ -155,9 +164,6 @@ class SimulationEngine:
                 current_tick=tick,
             )
 
-            if hasattr(self.state, "world_days_elapsed"):
-                self.state.world_days_elapsed = current_day
-                
             # Fase 4: Recolección de métricas para el CSV
             persons = self.state.get_all_persons()
             history.append({
@@ -178,7 +184,7 @@ class SimulationEngine:
 
         Args:
             pending: Búfer transaccional `PendingChanges` de este tick.
-            tick: Número del tick actual.
+            tick: Número de tick actual.
         """
         for data in pending.births:
             mother_id = data.get("mother_id", "Desconocida")
@@ -276,13 +282,17 @@ class SimulationEngine:
     ) -> None:
         """Crea la población inicial de la simulación de forma determinista.
 
+        Los agentes fundadores comienzan SOLTEROS, sin relaciones artificiales.
+        Las relaciones se formarán naturalmente durante la simulación a través
+        del sistema RelationshipManager.
+
         Args:
             config: Configuración compartida de la simulación.
             state: Estado del mundo donde se insertarán los agentes.
             size: Número de agentes fundadores.
         """
         logger = logging.getLogger("SimulationEngine")
-        logger.info("Generando %s agentes fundadores.", size)
+        logger.info("Generando %s agentes fundadores (solteros).", size)
 
         for entity_id in range(1, size + 1):
             base_fertility = random.uniform(0.5, 0.9)
@@ -327,7 +337,8 @@ class SimulationEngine:
             person.set_health_state("sano")
             person.update_pregnancy(False, 0.0)
 
-            partner_id = entity_id + 1 if entity_id % 2 else entity_id - 1
-            person.register_marriage(partner_id)
+            # NUEVO: NO crear relaciones artificiales
+            # Las relaciones se formarán naturalmente durante la simulación
+            # a través de RelationshipManager
 
             state.add_person(person)

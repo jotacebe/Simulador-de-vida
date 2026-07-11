@@ -6,21 +6,19 @@ ejecución de los sistemas no cause efectos secundarios indeseados y que
 los datos fluyan de forma segura hacia la fase de consolidación (commit).
 """
 
-from typing import List, Dict, Tuple, Any, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
 from systems.diseases.pathogen import Pathogen
 
+
 class PendingChanges:
-    """Contenedor de mutaciones encoladas para el estado del mundo.
-    
-    Acumula las decisiones de los sistemas biológicos, espaciales y sociales
-    durante el tick actual para ser aplicadas atómicamente por el WorldState.
-    """
+    """Contenedor de mutaciones encoladas para el estado del mundo."""
 
     def __init__(self) -> None:
         """Inicializa todas las colecciones transaccionales vacías."""
         self.movements: Dict[int, Tuple[int, int]] = {}
         
-        # Colecciones médicas (Soportan objetos de cepas virales e inmunidad)
+        # Colecciones médicas
         self.infections: List[Tuple[int, Pathogen]] = []
         self.recoveries: List[Tuple[int, str]] = []
         
@@ -35,6 +33,20 @@ class PendingChanges:
         self.age_increments: Dict[int, float] = {}
         self.deaths: Dict[int, str] = {} 
         self.days_to_add: float = 0.0
+        
+        # Colecciones psicológicas (Emociones y Memoria)
+        self.emotion_updates: Dict[int, List[Tuple[str, float]]] = {}
+        self.memory_updates: Dict[int, Dict[str, Any]] = {}
+        
+        # Colecciones de Libre Albedrío (Flags transaccionales - legacy)
+        self.free_will_flags_updates: Dict[int, Dict[str, bool]] = {}
+        
+        # =====================================================================
+        # NUEVO: Colecciones de Motivaciones Continuas
+        # =====================================================================
+        # motivation_updates: entity_id -> dict de {motivation_name: delta}
+        # Los deltas son acumulativos durante el tick
+        self.motivation_updates: Dict[int, Dict[str, float]] = {}
 
     # ==========================================
     # SALUD Y EPIDEMIOLOGÍA
@@ -72,25 +84,37 @@ class PendingChanges:
         if entity_id not in self.deaths:
             self.deaths[entity_id] = reason
 
-    def register_birth(self, mother_id: int, father_id: Optional[int], x: int, y: int, genome: Any) -> None:
+    def register_birth(
+        self,
+        mother_id: int,
+        father_id: Optional[int],
+        x: int,
+        y: int,
+        genome: Any,
+    ) -> None:
         """Registra un nacimiento pendiente con el ADN recombinado multiespecie."""
         self.births.append({
             "mother_id": mother_id,
             "father_id": father_id,
             "x": x,
             "y": y,
-            "genome": genome
+            "genome": genome,
         })
 
-    def register_pregnancy_update(self, entity_id: int, is_pregnant: bool, 
-                                  pregnancy_days: float, failed_increment: int = 0,
-                                  litter_size: int = 1) -> None:
+    def register_pregnancy_update(
+        self,
+        entity_id: int,
+        is_pregnant: bool,
+        pregnancy_days: float,
+        failed_increment: int = 0,
+        litter_size: int = 1,
+    ) -> None:
         """Registra el avance de gestación o abortos, soportando camadas."""
         self.pregnancy_updates[entity_id] = {
             "is_pregnant": is_pregnant,
             "pregnancy_days": float(pregnancy_days),
             "failed_increment": int(failed_increment),
-            "litter_size": int(litter_size)
+            "litter_size": int(litter_size),
         }
 
     # ==========================================
@@ -104,22 +128,115 @@ class PendingChanges:
         """Registra una ruptura o viudedad atómica para limpiar el grafo social."""
         self.divorces.append((p1, p2))
 
-    def register_adoption(self, child_id: int, parent_a: int, parent_b: Optional[int] = None) -> None:
+    def register_adoption(
+        self,
+        child_id: int,
+        parent_a: int,
+        parent_b: Optional[int] = None,
+        is_single_parent: bool = False,
+    ) -> None:
         """Añade una transferencia de filiación legal a la cola transaccional."""
         self.adoptions.append({
-            "child_id": child_id, 
-            "parent_a": parent_a, 
-            "parent_b": parent_b
+            "child_id": child_id,
+            "parent_a": parent_a,
+            "parent_b": parent_b,
+            "is_single_parent": is_single_parent,
         })
-    
+
+    # ==========================================
+    # PSICOLOGÍA Y MEMORIA TRANSACCIONAL
+    # ==========================================
+    def register_emotion_update(
+        self, entity_id: int, emotion: str, amount: float
+    ) -> None:
+        """Encola un cambio en el estado emocional de una entidad."""
+        if entity_id not in self.emotion_updates:
+            self.emotion_updates[entity_id] = []
+        self.emotion_updates[entity_id].append((emotion, amount))
+
+    def register_memory_update(
+        self, entity_id: int, key: str, value: Any
+    ) -> None:
+        """Encola un cambio en la memoria cognitiva de una entidad."""
+        if entity_id not in self.memory_updates:
+            self.memory_updates[entity_id] = {}
+        self.memory_updates[entity_id][key] = value
+
+    # ==========================================
+    # LIBRE ALBEDRÍO TRANSACCIONAL (Legacy - Banderas binarias)
+    # ==========================================
+    def register_free_will_flag(
+        self, entity_id: int, flag_name: str, value: bool
+    ) -> None:
+        """Encola un cambio en los flags de libre albedrío de una entidad."""
+        if entity_id not in self.free_will_flags_updates:
+            self.free_will_flags_updates[entity_id] = {}
+        self.free_will_flags_updates[entity_id][flag_name] = value
+
+    def consume_free_will_flag(
+        self, entity_id: int, flag_name: str
+    ) -> None:
+        """Consume un impulso de libre albedrío (lo desactiva transaccionalmente)."""
+        self.register_free_will_flag(entity_id, flag_name, False)
+
+    # ==========================================
+    # NUEVO: MOTIVACIONES CONTINUAS TRANSACCIONALES
+    # ==========================================
+    def register_motivation_update(
+        self, entity_id: int, motivation_name: str, delta: float
+    ) -> None:
+        """Encola un cambio incremental en una motivación continua.
+        
+        Los deltas son acumulativos durante el tick. Al final del tick,
+        todos los deltas se aplican de una vez a las motivaciones del agente.
+        
+        Args:
+            entity_id: ID de la entidad afectada.
+            motivation_name: Nombre de la motivación (ej: 'independence').
+            delta: Cambio incremental (puede ser positivo o negativo).
+        """
+        if entity_id not in self.motivation_updates:
+            self.motivation_updates[entity_id] = {}
+        
+        # Acumular deltas si ya hay cambios previos para esta motivación
+        current_delta = self.motivation_updates[entity_id].get(motivation_name, 0.0)
+        self.motivation_updates[entity_id][motivation_name] = current_delta + delta
+
+    def set_motivation(
+        self, entity_id: int, motivation_name: str, value: float
+    ) -> None:
+        """Establece un valor absoluto para una motivación (no acumulativo).
+        
+        Útil cuando se quiere forzar un valor específico en lugar de un delta.
+        
+        Args:
+            entity_id: ID de la entidad afectada.
+            motivation_name: Nombre de la motivación.
+            value: Nuevo valor absoluto [0.0, 1.0].
+        """
+        if entity_id not in self.motivation_updates:
+            self.motivation_updates[entity_id] = {}
+        # Usamos un valor especial para indicar que es un set absoluto
+        self.motivation_updates[entity_id][f"__set__{motivation_name}"] = value
+
+    def get_pending_motivation_deltas(
+        self, entity_id: int
+    ) -> Dict[str, float]:
+        """Obtiene todos los deltas pendientes de motivaciones para una entidad.
+        
+        Args:
+            entity_id: ID de la entidad.
+            
+        Returns:
+            Diccionario {motivation_name: delta} acumulado.
+        """
+        return self.motivation_updates.get(entity_id, {})
+
     # ==========================================
     # CICLO DE VIDA DEL BÚFER
     # ==========================================
     def clear(self) -> None:
-        """Limpia el búfer reasignando las colecciones (Memory-Safe).
-        
-        Debe ser llamado obligatoriamente tras cada commit global en el WorldState.
-        """
+        """Limpia el búfer reasignando las colecciones (Memory-Safe)."""
         self.movements.clear()
         self.infections.clear()
         self.recoveries.clear()
@@ -131,3 +248,7 @@ class PendingChanges:
         self.adoptions.clear()
         self.deaths.clear()
         self.days_to_add = 0.0
+        self.emotion_updates.clear()
+        self.memory_updates.clear()
+        self.free_will_flags_updates.clear()
+        self.motivation_updates.clear()

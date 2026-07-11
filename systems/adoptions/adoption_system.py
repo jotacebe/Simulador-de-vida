@@ -1,16 +1,29 @@
 """Módulo responsable de la reasignación familiar de menores sin tutores vivos.
 
 Identifica menores huérfanos y los asigna a las familias más idóneas del ecosistema
-utilizando un algoritmo de utilidad (Utility AI) que evalúa selección de parentesco (Kin Selection),
-factores genéticos, emocionales, de salud y proximidad espacial, garantizando
-una diferencia de edad mínima coherente y límites de bienestar (Hard Limits).
+utilizando un algoritmo de utilidad (Utility AI) que evalúa selección de parentesco
+(Kin Selection), factores genéticos, emocionales, de salud y proximidad espacial,
+garantizando una diferencia de edad mínima coherente y límites de bienestar (Hard Limits).
+
+Integra con:
+- Sistema de cohesión de hermanos (agrupación O(n))
+- Sistema de fallback con penalizaciones progresivas por abandono
+- Soporte para adopción monoparental
+- NUEVO: Sistema de motivaciones continuas para comportamiento emergente
+  - 'protection' alta → mejor candidato para adopción
+  - 'cooperation' alta → mejor candidato para adopción
+  - Tras adopción: refuerzo de 'protection' y 'cooperation' (aprendizaje)
+
+Todos los cambios psicológicos (emociones y memoria) se registran en el búfer
+transaccional (PendingChanges) y se aplican atómicamente durante el commit,
+garantizando la coherencia del estado durante la ejecución del tick.
 """
 
 from __future__ import annotations
 
 import logging
 import math
-from typing import Any, List, Set
+from typing import Any, Dict, List, Set
 
 from core.config.simulation_config import SimulationConfig
 from core.state.pending_changes import PendingChanges
@@ -22,15 +35,22 @@ from systems.environment.environment_context import EnvironmentContext
 class AdoptionSystem:
     """Identifica huérfanos y asigna familias mediante procesos de filtrado estricto."""
 
-    def __init__(self, config: SimulationConfig, ancestry_queries: Any = None) -> None:
+    def __init__(
+        self,
+        config: SimulationConfig,
+        ancestry_queries: Any = None,
+        event_bus: Any = None,
+    ) -> None:
         """Inicializa el sistema vinculándolo a la configuración centralizada.
 
         Args:
             config: Configuración maestra de la simulación.
             ancestry_queries: Fachada de consultas genealógicas para detectar familiares.
+            event_bus: Bus de eventos opcional (reservado para uso futuro).
         """
         self.config = config
         self.ancestry_queries = ancestry_queries
+        self.event_bus = event_bus
         self.logger = logging.getLogger("AdoptionSystem")
 
     def process(
@@ -40,7 +60,14 @@ class AdoptionSystem:
         delta_days: float,
         context: EnvironmentContext,
     ) -> None:
-        """Ejecuta el ciclo de adopciones con filtrado de idoneidad estricto."""
+        """Ejecuta el ciclo de adopciones con filtrado de idoneidad estricto.
+        
+        Args:
+            state: Estado autoritativo del mundo.
+            pending: Búfer transaccional donde se registran los cambios.
+            delta_days: Duración del tick en días simulados.
+            context: Contexto ambiental del tick.
+        """
         adoptions_cfg = self.config.adoptions
         all_persons = state.get_all_persons()
 
@@ -53,19 +80,39 @@ class AdoptionSystem:
         if not orphans:
             return
 
+        # AGRUPACIÓN DE HUÉRFANOS POR HERMANDAD (Optimizado O(n))
+        sibling_groups = self._group_by_siblinghood(orphans)
+        self.logger.debug(
+            "Detectados %d grupos de hermanos entre %d huérfanos",
+            len(sibling_groups),
+            len(orphans),
+        )
+
         # 2. FILTRADO DE FAMILIAS ELEGIBLES (Hard Limits)
         eligible_parents: List[Person] = []
         seen_couples: Set[int] = set()
 
         for person in all_persons:
-            # Evitar procesar muertos o cónyuges de familias ya validadas
             if person.entity_id in pending.deaths or person.entity_id in seen_couples:
                 continue
 
-            # FILTRO A: Condiciones base (Matrimonio y edad mínima)
-            is_old_enough = person.age >= adoptions_cfg.min_adoptive_age_days
-            is_married = person.marital_status == "casado" and person.partner_id is not None
-            if not (is_old_enough and is_married):
+            # FILTRO A: Condiciones base (Matrimonio o Monoparentalidad)
+            is_couple = (
+                person.marital_status == "casado" and person.partner_id is not None
+            )
+            is_single = person.marital_status in ("soltero", "viudo", "divorciado")
+            
+            if is_couple:
+                if person.age < adoptions_cfg.min_adoptive_age_days:
+                    continue
+            elif is_single and adoptions_cfg.allow_single_parent_adoption:
+                if person.age < adoptions_cfg.min_single_parent_age_days:
+                    continue
+                if person.emotions.get("energy", 0.0) < adoptions_cfg.min_single_parent_energy:
+                    continue
+                if person.emotions.get("stress", 0.0) > adoptions_cfg.max_single_parent_stress:
+                    continue
+            else:
                 continue
 
             # FILTRO B: Límite de carga familiar configurada
@@ -76,144 +123,520 @@ class AdoptionSystem:
             if person.is_sick:
                 continue
 
-            # Si el estrés fisiológico es crítico, se rechaza como candidato
             if person.emotions.get("stress", 0.0) > 0.7:
                 continue
 
-            # FILTRO D: Entorno saturado (usando la densidad local para evitar hacinamiento)
+            # FILTRO D: Entorno saturado
             local_pressure = context.get_local_pressure(person.x, person.y)
-            if local_pressure > 0.8:  
+            if local_pressure > 0.8:
                 continue
 
-            # Si supera todos los filtros, es una familia estructuralmente apta
             eligible_parents.append(person)
             if person.partner_id is not None:
                 seen_couples.add(person.partner_id)
 
-        if not eligible_parents:
-            return
+        # 3. ORDENACIÓN DINÁMICA Y ASIGNACIÓN TRANSACCIONAL POR GRUPOS
+        min_age_diff = getattr(adoptions_cfg, "min_age_difference_days", 5475.0)
+        adopted_orphans: Set[int] = set()
 
-        # 3. ORDENACIÓN DINÁMICA Y ASIGNACIÓN TRANSACCIONAL
-        # Leemos la diferencia de edad mínima, por defecto 15 años (5475 días)
-        min_age_diff = getattr(adoptions_cfg, 'min_age_difference_days', 5475.0)
-
-        for orphan in orphans:
+        for sibling_group in sibling_groups:
             if not eligible_parents:
-                break  # Se agotaron las familias aptas en el mundo
+                break
 
-            # Descartamos candidatos cuya diferencia de edad con ESTE menor no sea viable
-            valid_candidates = [
-                p for p in eligible_parents
-                if (p.age - orphan.age) >= min_age_diff
-            ]
-
-            if not valid_candidates:
-                continue
-
-            # Ordenamos a los candidatos aptos mediante el algoritmo de Utility AI
-            valid_candidates.sort(
-                key=lambda p: self._calculate_suitability(p, orphan, self.ancestry_queries, context),
-                reverse=True
+            best_family = self._find_family_for_sibling_group(
+                sibling_group, eligible_parents, min_age_diff, context
             )
 
-            new_parent = valid_candidates[0]
-            
-            # Lo retiramos de la bolsa global para que no acapare múltiples adopciones en el mismo tick
-            eligible_parents.remove(new_parent)
-            
-            new_partner = state.get_person_by_id(new_parent.partner_id) if new_parent.partner_id else None
+            if best_family is None:
+                self.logger.debug(
+                    "No hay familia para grupo de %d hermanos, procesando individualmente",
+                    len(sibling_group),
+                )
+                for orphan in sibling_group:
+                    self._process_individual_adoption(
+                        orphan, eligible_parents, min_age_diff, context,
+                        state, pending, adopted_orphans,
+                    )
+            else:
+                self._process_group_adoption(
+                    sibling_group, best_family, state, pending, adopted_orphans,
+                )
+                eligible_parents.remove(best_family)
 
-            # Registramos las mutaciones en el búfer transaccional
+        # 4. FALLBACK: PENALIZACIONES PROGRESIVAS PARA HUÉRFANOS NO ADOPTADOS
+        self._apply_abandonment_penalties(orphans, adopted_orphans, delta_days, pending)
+
+    # =====================================================================
+    # AGRUPACIÓN POR HERMANDAD (Optimizado O(n))
+    # =====================================================================
+
+    def _group_by_siblinghood(self, orphans: List[Person]) -> List[List[Person]]:
+        """Agrupa huérfanos por hermandad (biológica o adoptiva) en O(n).
+        
+        Args:
+            orphans: Lista de huérfanos elegibles.
+            
+        Returns:
+            Lista de grupos, donde cada grupo es una lista de hermanos.
+        """
+        if not orphans:
+            return []
+
+        mother_to_orphans: Dict[int, List[Person]] = {}
+        father_to_orphans: Dict[int, List[Person]] = {}
+        adoptive_to_orphans: Dict[int, List[Person]] = {}
+
+        for orphan in orphans:
+            if orphan.mother_id is not None:
+                mother_to_orphans.setdefault(orphan.mother_id, []).append(orphan)
+            
+            if orphan.father_id is not None:
+                father_to_orphans.setdefault(orphan.father_id, []).append(orphan)
+            
+            for adoptive_parent_id in orphan.adoptive_parents:
+                adoptive_to_orphans.setdefault(adoptive_parent_id, []).append(orphan)
+
+        parent_map: Dict[int, int] = {orphan.entity_id: orphan.entity_id for orphan in orphans}
+        
+        def find(x: int) -> int:
+            if parent_map[x] != x:
+                parent_map[x] = find(parent_map[x])
+            return parent_map[x]
+        
+        def union(x: int, y: int) -> None:
+            root_x = find(x)
+            root_y = find(y)
+            if root_x != root_y:
+                parent_map[root_x] = root_y
+
+        for orphan_list in mother_to_orphans.values():
+            for i in range(len(orphan_list) - 1):
+                union(orphan_list[i].entity_id, orphan_list[i + 1].entity_id)
+
+        for orphan_list in father_to_orphans.values():
+            for i in range(len(orphan_list) - 1):
+                union(orphan_list[i].entity_id, orphan_list[i + 1].entity_id)
+
+        for orphan_list in adoptive_to_orphans.values():
+            for i in range(len(orphan_list) - 1):
+                union(orphan_list[i].entity_id, orphan_list[i + 1].entity_id)
+
+        groups: Dict[int, List[Person]] = {}
+        for orphan in orphans:
+            root = find(orphan.entity_id)
+            if root not in groups:
+                groups[root] = []
+            groups[root].append(orphan)
+
+        return list(groups.values())
+
+    # =====================================================================
+    # BÚSQUEDA Y ASIGNACIÓN DE FAMILIAS
+    # =====================================================================
+
+    def _find_family_for_sibling_group(
+        self,
+        sibling_group: List[Person],
+        eligible_parents: List[Person],
+        min_age_diff: float,
+        context: EnvironmentContext,
+    ) -> Person | None:
+        """Busca la mejor familia que pueda adoptar a TODOS los hermanos del grupo.
+        
+        Args:
+            sibling_group: Lista de hermanos huérfanos.
+            eligible_parents: Lista de familias candidatas.
+            min_age_diff: Diferencia de edad mínima requerida.
+            context: Contexto ambiental.
+            
+        Returns:
+            La mejor familia candidata, o None si ninguna puede con todos.
+        """
+        group_size = len(sibling_group)
+        valid_families: List[Person] = []
+        
+        for family in eligible_parents:
+            available_slots = (
+                self.config.adoptions.max_children_for_adoption - family.children_count
+            )
+            if available_slots < group_size:
+                continue
+            
+            all_age_valid = all(
+                (family.age - orphan.age) >= min_age_diff for orphan in sibling_group
+            )
+            if not all_age_valid:
+                continue
+            
+            valid_families.append(family)
+        
+        if not valid_families:
+            return None
+        
+        def family_suitability(family: Person) -> float:
+            total_score = sum(
+                self._calculate_suitability(family, orphan, self.ancestry_queries, context)
+                for orphan in sibling_group
+            )
+            sibling_bonus = group_size * 50.0
+            return total_score + sibling_bonus
+        
+        valid_families.sort(key=family_suitability, reverse=True)
+        return valid_families[0]
+
+    # =====================================================================
+    # PROCESAMIENTO DE ADOPCIONES (Con impacto emocional transaccional)
+    # =====================================================================
+
+    def _apply_parent_emotional_impact(
+        self,
+        parent: Person,
+        partner: Person | None,
+        children_count: int,
+        is_group_adoption: bool,
+        pending: PendingChanges,
+    ) -> None:
+        """Registra en el búfer el impacto emocional en los padres adoptivos.
+        
+        Args:
+            parent: Primer progenitor adoptivo.
+            partner: Segundo progenitor adoptivo (puede ser None).
+            children_count: Número de niños adoptados en esta transacción.
+            is_group_adoption: True si es adopción grupal de hermanos.
+            pending: Búfer transaccional donde se registran los cambios.
+        """
+        fw_cfg = self.config.free_will
+        
+        if is_group_adoption:
+            happiness_gain = 0.6 + (children_count * 0.1)
+        else:
+            happiness_gain = 0.5
+        
+        stress_gain = 0.3 + (children_count * 0.15)
+        energy_loss = 0.1 + (children_count * 0.05)
+        
+        pending.register_emotion_update(parent.entity_id, "happiness", happiness_gain)
+        pending.register_emotion_update(parent.entity_id, "stress", stress_gain)
+        pending.register_emotion_update(parent.entity_id, "energy", -energy_loss)
+        
+        # =================================================================
+        # NUEVO: APRENDIZAJE POR ADOPCIÓN - Reforzar 'protection' y 'cooperation'
+        # =================================================================
+        # Una adopción exitosa refuerza las motivaciones de proteger y cooperar
+        if hasattr(parent, 'get_motivation'):
+            pending.register_motivation_update(
+                parent.entity_id, "protection", fw_cfg.success_reinforcement_rate
+            )
+            pending.register_motivation_update(
+                parent.entity_id, "cooperation", fw_cfg.success_reinforcement_rate * 0.7
+            )
+        
+        if partner is not None:
+            pending.register_emotion_update(partner.entity_id, "happiness", happiness_gain)
+            pending.register_emotion_update(partner.entity_id, "stress", stress_gain)
+            pending.register_emotion_update(partner.entity_id, "energy", -energy_loss)
+            
+            # Reforzar motivaciones del partner también
+            if hasattr(partner, 'get_motivation'):
+                pending.register_motivation_update(
+                    partner.entity_id, "protection", fw_cfg.success_reinforcement_rate
+                )
+                pending.register_motivation_update(
+                    partner.entity_id, "cooperation", fw_cfg.success_reinforcement_rate * 0.7
+                )
+
+    def _process_group_adoption(
+        self,
+        sibling_group: List[Person],
+        new_parent: Person,
+        state: WorldState,
+        pending: PendingChanges,
+        adopted_orphans: Set[int],
+    ) -> None:
+        """Procesa la adopción de un grupo completo de hermanos.
+        
+        Args:
+            sibling_group: Lista de hermanos a adoptar.
+            new_parent: Familia adoptante.
+            state: Estado del mundo.
+            pending: Búfer transaccional.
+            adopted_orphans: Set de IDs de huérfanos ya adoptados.
+        """
+        new_partner = (
+            state.get_person_by_id(new_parent.partner_id)
+            if new_parent.partner_id
+            else None
+        )
+
+        is_single_parent = new_partner is None
+
+        for orphan in sibling_group:
             pending.register_adoption(
                 child_id=orphan.entity_id,
                 parent_a=new_parent.entity_id,
-                parent_b=new_partner.entity_id if new_partner else None
+                parent_b=new_partner.entity_id if new_partner else None,
+                is_single_parent=is_single_parent,
             )
             pending.register_movement(orphan.entity_id, new_parent.x, new_parent.y)
 
-            # =================================================================
-            # SHOCK EMOCIONAL INICIAL (Adaptación psicológica del menor)
-            # =================================================================
-            if not hasattr(orphan, 'memory') or orphan.memory is None:
-                orphan.memory = {}
+            pending.register_memory_update(orphan.entity_id, "trauma_adoption", 0.7)
+            pending.register_emotion_update(orphan.entity_id, "stress", 0.4)
+            pending.register_emotion_update(orphan.entity_id, "happiness", -0.2)
+
+            adopted_orphans.add(orphan.entity_id)
+
+        self._apply_parent_emotional_impact(
+            parent=new_parent,
+            partner=new_partner,
+            children_count=len(sibling_group),
+            is_group_adoption=True,
+            pending=pending,
+        )
+
+        self.logger.info(
+            "Adopción grupal registrada: %d hermanos asignados a familia %s%s",
+            len(sibling_group),
+            new_parent.entity_id,
+            " (monoparental)" if is_single_parent else "",
+        )
+
+    def _process_individual_adoption(
+        self,
+        orphan: Person,
+        eligible_parents: List[Person],
+        min_age_diff: float,
+        context: EnvironmentContext,
+        state: WorldState,
+        pending: PendingChanges,
+        adopted_orphans: Set[int],
+    ) -> None:
+        """Procesa la adopción individual de un huérfano.
+        
+        Args:
+            orphan: Huérfano a adoptar.
+            eligible_parents: Lista de familias candidatas (mutable).
+            min_age_diff: Diferencia de edad mínima requerida.
+            context: Contexto ambiental.
+            state: Estado del mundo.
+            pending: Búfer transaccional.
+            adopted_orphans: Set de IDs de huérfanos ya adoptados.
+        """
+        if not eligible_parents:
+            return
+
+        valid_candidates = [
+            p for p in eligible_parents if (p.age - orphan.age) >= min_age_diff
+        ]
+
+        if not valid_candidates:
+            return
+
+        valid_candidates.sort(
+            key=lambda p: self._calculate_suitability(
+                p, orphan, self.ancestry_queries, context
+            ),
+            reverse=True,
+        )
+
+        new_parent = valid_candidates[0]
+        eligible_parents.remove(new_parent)
+
+        new_partner = (
+            state.get_person_by_id(new_parent.partner_id)
+            if new_parent.partner_id
+            else None
+        )
+
+        is_single_parent = new_partner is None
+
+        pending.register_adoption(
+            child_id=orphan.entity_id,
+            parent_a=new_parent.entity_id,
+            parent_b=new_partner.entity_id if new_partner else None,
+            is_single_parent=is_single_parent,
+        )
+        pending.register_movement(orphan.entity_id, new_parent.x, new_parent.y)
+
+        pending.register_memory_update(orphan.entity_id, "trauma_adoption", 1.2)
+        pending.register_emotion_update(orphan.entity_id, "stress", 0.7)
+        pending.register_emotion_update(orphan.entity_id, "happiness", -0.6)
+
+        self._apply_parent_emotional_impact(
+            parent=new_parent,
+            partner=new_partner,
+            children_count=1,
+            is_group_adoption=False,
+            pending=pending,
+        )
+
+        adopted_orphans.add(orphan.entity_id)
+
+        self.logger.info(
+            "Adopción individual: Menor %s → Familia %s%s (Dif. Edad: %.1f días)",
+            orphan.entity_id,
+            new_parent.entity_id,
+            " (monoparental)" if is_single_parent else "",
+            (new_parent.age - orphan.age),
+        )
+
+    # =====================================================================
+    # FALLBACK: PENALIZACIONES POR ABANDONO (TRANSACCIONAL)
+    # =====================================================================
+
+    def _apply_abandonment_penalties(
+        self,
+        orphans: List[Person],
+        adopted_orphans: Set[int],
+        delta_days: float,
+        pending: PendingChanges,
+    ) -> None:
+        """Registra en el búfer el deterioro de huérfanos no adoptados.
+        
+        Args:
+            orphans: Lista completa de huérfanos elegibles detectados.
+            adopted_orphans: IDs de huérfanos adoptados en este tick.
+            delta_days: Duración del tick en días simulados.
+            pending: Búfer transaccional.
+        """
+        adoptions_cfg = self.config.adoptions
+        
+        stress_rate = adoptions_cfg.abandonment_stress_rate
+        happiness_rate = adoptions_cfg.abandonment_happiness_rate
+        trauma_rate = adoptions_cfg.abandonment_trauma_rate
+        
+        for orphan in orphans:
+            if orphan.entity_id in adopted_orphans:
+                continue
             
-            # Impronta de trauma en memoria (será disipada por el CognitiveMemorySystem)
-            orphan.memory["trauma_adoption"] = 1.0
+            if orphan.entity_id in pending.memory_updates:
+                current_trauma = pending.memory_updates[orphan.entity_id].get(
+                    "trauma_abandonment", orphan.memory.get("trauma_abandonment", 0.0)
+                )
+            else:
+                current_trauma = orphan.memory.get("trauma_abandonment", 0.0)
+            
+            new_trauma = min(1.0, current_trauma + (trauma_rate * delta_days))
+            
+            pending.register_memory_update(orphan.entity_id, "trauma_abandonment", new_trauma)
+            pending.register_emotion_update(orphan.entity_id, "stress", stress_rate * delta_days)
+            pending.register_emotion_update(orphan.entity_id, "happiness", -happiness_rate * delta_days)
+            
+            if new_trauma > 0.5:
+                self.logger.debug(
+                    "Huérfano %s sufre abandono prolongado (Trauma: %.2f)",
+                    orphan.entity_id,
+                    new_trauma,
+                )
 
-            # Impacto directo a los sistemas fisiológicos usando el setter seguro
-            orphan.update_emotion("stress", 0.6)
-            orphan.update_emotion("happiness", -0.5)
+    # =====================================================================
+    # VALIDACIÓN Y EVALUACIÓN
+    # =====================================================================
 
-            self.logger.info(
-                "Adopción registrada: Menor %s asignado a familia %s (Dif. Edad: %.1f días, Score: %.2f)",
-                orphan.entity_id,
-                new_parent.entity_id,
-                (new_parent.age - orphan.age),
-                self._calculate_suitability(new_parent, orphan, self.ancestry_queries, context)
-            )
-
-    def _is_eligible_orphan(self, person: Person, state: WorldState, pending: PendingChanges, cfg: Any) -> bool:
-        """Valida si un individuo cumple todos los requisitos legales para ser adoptable."""
-        # Filtro 1: No procesar entidades que están muriendo
+    def _is_eligible_orphan(
+        self, person: Person, state: WorldState, pending: PendingChanges, cfg: Any
+    ) -> bool:
+        """Valida si un individuo cumple todos los requisitos para ser adoptable.
+        
+        Args:
+            person: Candidato a evaluar.
+            state: Estado del mundo.
+            pending: Búfer transaccional.
+            cfg: Configuración de adopciones.
+            
+        Returns:
+            True si el individuo es un huérfano elegible.
+        """
         if person.entity_id in pending.deaths:
             return False
             
-        # Filtro 2: Comprobación de que no ha sido adoptado previamente
         if len(person.adoptive_parents) > 0:
             return False
             
-        # Filtro 3: Es menor de edad según configuración
         if person.age > cfg.max_orphan_age_days:
             return False
 
-        # Filtro 4: No le queda ningún progenitor biológico vivo
-        father_alive = person.father_id is not None and state.get_person_by_id(person.father_id) is not None
-        mother_alive = person.mother_id is not None and state.get_person_by_id(person.mother_id) is not None
+        father_alive = (
+            person.father_id is not None
+            and state.get_person_by_id(person.father_id) is not None
+        )
+        mother_alive = (
+            person.mother_id is not None
+            and state.get_person_by_id(person.mother_id) is not None
+        )
 
-        # Debe haber tenido algún padre registrado y estar ambos muertos
-        return (person.father_id is not None or person.mother_id is not None) and not father_alive and not mother_alive
+        return (
+            person.father_id is not None or person.mother_id is not None
+        ) and not father_alive and not mother_alive
 
     def _calculate_suitability(
-        self, 
-        parent: Person, 
-        orphan: Person, 
-        ancestry: Any, 
-        context: EnvironmentContext
+        self,
+        parent: Person,
+        orphan: Person,
+        ancestry: Any,
+        context: EnvironmentContext,
     ) -> float:
-        """Calcula el índice de idoneidad de un adoptante usando Múltiples Criterios (Utility AI)."""
+        """Calcula el índice de idoneidad de un adoptante (Utility AI).
+        
+        Args:
+            parent: Candidato adoptante.
+            orphan: Huérfano a asignar.
+            ancestry: Fachada de consultas genealógicas.
+            context: Contexto ambiental.
+            
+        Returns:
+            Puntuación de idoneidad (mayor = mejor candidato).
+        """
         score = 0.0
 
-        # A. SELECCIÓN DE PARENTESCO (Kin Selection)
         if ancestry is not None:
             kinship_degree = ancestry.get_kinship_degree(parent.entity_id, orphan.entity_id)
             if kinship_degree > 0:
-                # Tremenda bonificación por consanguinidad (Supera los obstáculos espaciales)
-                score += (100.0 / kinship_degree)
+                score += 100.0 / kinship_degree
 
-        # B. COMPATIBILIDAD ESPACIAL (Distancia y Presión Ambiental)
-        distance = math.sqrt((parent.x - orphan.x)**2 + (parent.y - orphan.y)**2)
-        score -= (distance * 0.2)  # A más distancia física, menos puntos
+        distance = math.sqrt((parent.x - orphan.x) ** 2 + (parent.y - orphan.y) ** 2)
+        score -= distance * 0.2
         
-        # Penalización fuerte si la familia vive en zona con presión alta (por debajo del Hard Limit)
         local_pressure = context.get_local_pressure(parent.x, parent.y)
-        score -= (local_pressure * 50.0)
+        score -= local_pressure * 50.0
 
-        # C. FACTORES FENOTÍPICOS Y DE SALUD
         score += parent.effective_sociability * 10.0
 
         stress = parent.emotions.get("stress", 0.0)
         happiness = parent.emotions.get("happiness", 0.5)
         
-        score -= (stress * 30.0)      # Penalizamos fuertemente el estrés residual
-        score += (happiness * 20.0)   # Premiamos un entorno familiar feliz
+        score -= stress * 30.0
+        score += happiness * 20.0
+        score -= parent.children_count * 5.0
 
-        score -= (parent.children_count * 5.0)  # Premiamos a familias con menos hijos actualmente
-
-        # D. ESTABILIDAD MATRIMONIAL Y VITAL
         stability_years = parent.relationship_days / 365.0
         score += min(15.0, stability_years * 1.5)
 
         if parent.is_senior:
-            score -= 10.0  # Penalización leve a ancianos para asegurar maximizar los años de cuidado futuro
+            score -= 10.0
+
+        adoptions_cfg = self.config.adoptions
+        age_ratio = orphan.age / adoptions_cfg.max_orphan_age_days
+        age_penalty = (age_ratio ** adoptions_cfg.age_penalty_exponent) * adoptions_cfg.age_penalty_multiplier
+        score -= age_penalty
+
+        is_single_parent = (
+            parent.marital_status in ("soltero", "viudo", "divorciado")
+            and parent.partner_id is None
+        )
+        if is_single_parent:
+            score -= adoptions_cfg.single_parent_penalty
+
+        # =================================================================
+        # NUEVO: BONUS POR MOTIVACIONES 'protection' y 'cooperation'
+        # =================================================================
+        # Agentes con motivaciones altas de protección y cooperación son
+        # mejores candidatos para adopción
+        if hasattr(parent, 'get_motivation'):
+            protection = parent.get_motivation("protection")
+            cooperation = parent.get_motivation("cooperation")
+            
+            # Bonus proporcional a las motivaciones (hasta +20 puntos cada una)
+            score += protection * 20.0
+            score += cooperation * 15.0
 
         return score

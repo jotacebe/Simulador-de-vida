@@ -21,8 +21,8 @@ Cada tick completo procesa las siguientes fases en estricto orden secuencial:
    - Resuelve colisiones espaciales físicas (MovementResolver).
 
 4. Fase Social ('relationships'):
-   - Purga relaciones inválidas y declara viudedades.
-   - Genera nuevos compromisos y cortejos simétricos.
+   - NUEVO: Precalcula compatibilidades (CompatibilityEngine).
+   - NUEVO: Gestiona transiciones relacionales (RelationshipManager).
    - Procesa reasignaciones familiares legales (Adopciones).
 
 5. Fase de Salud ('health'):
@@ -34,8 +34,7 @@ Cada tick completo procesa las siguientes fases en estricto orden secuencial:
 
 7. Fase de Mortalidad ('mortality'):
    - Calcula las curvas de supervivencia (Gompertz) y decreta fallecimientos.
-   - Purga las acciones de los recién fallecidos del búfer (DeathResolver) 
-     para evitar que existan acciones de 'fantasmas' pendientes de commit.
+   - Purga las acciones de los recién fallecidos del búfer (DeathResolver).
 
 8. Fase Observacional ('observers'):
    - Sincroniza el árbol genealógico.
@@ -49,6 +48,7 @@ búfer y altera los objetos de memoria.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from core.config.simulation_config import SimulationConfig
 from core.execution.phase_executor import PhaseDefinition
@@ -71,8 +71,11 @@ from systems.mortality.mortality_system import MortalitySystem
 from systems.movement.migration_system import MigrationSystem
 from systems.movement.movement_resolver import MovementResolver
 from systems.movement.movement_system import MovementSystem
-from systems.relationships.marriage_system import MarriageSystem
-from systems.relationships.relationship_system import RelationshipSystem
+
+# NUEVOS sistemas de relaciones (Fase 1)
+from systems.relationships.compatibility_engine import CompatibilityEngine
+from systems.relationships.relationship_manager import RelationshipManager
+
 from systems.reproduction.conception_system import ConceptionSystem
 from systems.reproduction.gestation_system import GestationSystem
 from systems.temporal.temporal_system import TemporalSystem
@@ -81,13 +84,15 @@ from systems.temporal.temporal_system import TemporalSystem
 class PhaseScheduler:
     """Construye la lista maestra de fases y sistemas activos del motor."""
 
-    def __init__(self, config: SimulationConfig) -> None:
+    def __init__(self, config: SimulationConfig, event_bus: Any = None) -> None:
         """Inicializa el planificador orquestando la inyección de dependencias.
 
         Args:
             config: Configuración compartida de la simulación.
+            event_bus: Bus de eventos opcional para sistemas que lo requieran.
         """
         self.config = config
+        self.event_bus = event_bus
         self.logger = logging.getLogger(self.__class__.__name__)
 
     def build_phases(self) -> list[PhaseDefinition]:
@@ -110,13 +115,14 @@ class PhaseScheduler:
 
         density_system = DensitySystem(self.config)
 
-        relationship_system = RelationshipSystem(
+        # NUEVOS sistemas de relaciones (Fase 1)
+        compatibility_engine = CompatibilityEngine(self.config)
+        relationship_manager = RelationshipManager(
             config=self.config,
-            ancestry_queries=ancestry_queries,
+            compatibility_engine=compatibility_engine,
         )
 
         # Definición estructurada del ciclo biológico y físico
-        # Nota: Se añade ignore[arg-type] para mitigar la invarianza estricta de listas en Python
         phases = [
             PhaseDefinition(
                 name="temporal",
@@ -142,7 +148,6 @@ class PhaseScheduler:
                     MovementSystem(
                         config=self.config,
                         density_system=density_system,
-                        relationship_system=relationship_system,
                     ),
                     MovementResolver(self.config),
                 ],  # type: ignore[arg-type]
@@ -150,15 +155,16 @@ class PhaseScheduler:
             PhaseDefinition(
                 name="relationships",
                 systems=[
-                    relationship_system,
-                    MarriageSystem(
-                        config=self.config,
-                        ancestry_queries=ancestry_queries,
-                    ),
-                    # Se inyecta la dependencia genealógica para evaluar Kin Selection
+                    # NUEVOS sistemas de relaciones (reemplazan MarriageSystem y RelationshipSystem)
+                    compatibility_engine,
+                    relationship_manager,
+                    # Sistemas legacy DESACTIVADOS temporalmente
+                    # relationship_system,
+                    # MarriageSystem(config=self.config, ancestry_queries=ancestry_queries),
                     AdoptionSystem(
                         config=self.config,
                         ancestry_queries=ancestry_queries,
+                        event_bus=self.event_bus,
                     ),
                 ],  # type: ignore[arg-type]
             ),
@@ -199,11 +205,7 @@ class PhaseScheduler:
         return phases
 
     def get_registered_system_names(self) -> list[str]:
-        """Devuelve los nombres de los sistemas registrados para análisis y logging.
-
-        Returns:
-            Lista de nombres de clase de todos los sistemas activos.
-        """
+        """Devuelve los nombres de sistemas registrados para análisis y logging."""
         names: list[str] = []
         for phase in self.build_phases():
             for system in phase.systems:

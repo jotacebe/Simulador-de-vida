@@ -3,6 +3,10 @@
 Sustituye el movimiento lineal o aleatorio por un sistema de Campos de Potencial.
 Las entidades evalúan su vecindad ponderando recursos, epidemias, hacinamiento y
 vectores de migración a larga distancia.
+
+Integra con el nuevo sistema de relaciones sociales:
+- Usa partner_id (derivado de relationships[]) como ancla social
+- Mantiene compatibilidad con MigrationSystem
 """
 
 from __future__ import annotations
@@ -10,7 +14,7 @@ from __future__ import annotations
 import logging
 import math
 import random
-from typing import Any
+from typing import Any, Optional
 
 from core.config.simulation_config import SimulationConfig
 from core.state.pending_changes import PendingChanges
@@ -25,18 +29,15 @@ class MovementSystem:
         self,
         config: SimulationConfig,
         density_system: Any,
-        relationship_system: Any,
     ) -> None:
         """Inicializa el motor de movimiento inteligente.
 
         Args:
             config: Configuración maestra de la simulación.
             density_system: (Deprecado/Opcional) Sistema heredado de densidad.
-            relationship_system: Sistema para obtener los anclajes sociales.
         """
         self.config = config
         self.density_system = density_system
-        self.relationship_system = relationship_system
         self.logger = logging.getLogger(self.__class__.__name__)
 
     def process(
@@ -60,10 +61,8 @@ class MovementSystem:
             if person.entity_id in pending.deaths:
                 continue
 
-            # 2. DEFINICIÓN DEL OBJETIVO SOCIAL
-            social_target = self.relationship_system.get_social_anchor(person, state)
-            if social_target and social_target.entity_id in pending.deaths:
-                social_target = None
+            # 2. DEFINICIÓN DEL OBJETIVO SOCIAL (Nuevo sistema de relaciones)
+            social_target = self._get_social_anchor(person, state, pending)
 
             best_score = -float("inf")
             best_x, best_y = person.x, person.y
@@ -98,6 +97,35 @@ class MovementSystem:
             # 4. REGISTRO TRANSACCIONAL
             if best_x != person.x or best_y != person.y:
                 pending.register_movement(person.entity_id, best_x, best_y)
+
+    def _get_social_anchor(
+        self,
+        person: Any,
+        state: WorldState,
+        pending: PendingChanges,
+    ) -> Optional[Any]:
+        """Obtiene el ancla social del agente (pareja más consolidada).
+        
+        Usa partner_id que ahora es una property derivada de relationships[].
+        Prioriza relaciones CONSOLIDATED > COHABITATION > DATING.
+        
+        Args:
+            person: Agente que busca su ancla social.
+            state: Estado del mundo.
+            pending: Búfer transaccional (para verificar muertes).
+            
+        Returns:
+            La persona ancla si existe y está viva, None en caso contrario.
+        """
+        partner_id = getattr(person, "partner_id", None)
+        if partner_id is None:
+            return None
+        
+        # Verificar que la pareja no haya muerto en este tick
+        if partner_id in pending.deaths:
+            return None
+        
+        return state.get_person_by_id(partner_id)
 
     def _evaluate_cell_utility(
         self,
@@ -177,7 +205,7 @@ class MovementSystem:
             score -= dist_to_target * 2.0
 
         # =================================================================
-        # E. VECTOR DE MIGRACIÓN (Nuevo integrador del Punto 14)
+        # E. VECTOR DE MIGRACIÓN (Integrador de MigrationSystem)
         # =================================================================
         if isinstance(getattr(person, "memory", None), dict):
             migration_target = person.memory.get("migration_target")

@@ -2,7 +2,14 @@
 
 Implementa un modelo de Gompertz-Makeham expandido, evaluando no solo el 
 desgaste biológico, sino también la energía disponible, el estrés psicológico,
-la presión del entorno ambiental y el historial médico de la entidad.
+la presión del entorno ambiental, el historial médico de la entidad, el
+trauma por abandono en huérfanos sin tutela, y la letalidad de las infecciones
+activas.
+
+La letalidad de cada patógeno activo se integra en el cálculo de mortalidad,
+permitiendo que enfermedades más letales (ej: Ébola con letalidad 0.95) tengan
+un impacto significativamente mayor que enfermedades leves (ej: gripe con
+letalidad 0.01).
 """
 
 import random
@@ -15,11 +22,16 @@ from core.state.world_state import WorldState
 from core.state.pending_changes import PendingChanges
 from core.config.simulation_config import SimulationConfig
 
+
 class MortalitySystem:
     """Motor de mortalidad multifactorial con diagnósticos detallados."""
 
     def __init__(self, config: SimulationConfig) -> None:
-        """Inicializa el sistema vinculándolo a la configuración centralizada."""
+        """Inicializa el sistema vinculándolo a la configuración centralizada.
+        
+        Args:
+            config: Configuración maestra de la simulación.
+        """
         self.config = config
         self.logger = logging.getLogger(self.__class__.__name__)
 
@@ -27,9 +39,18 @@ class MortalitySystem:
         """Calcula la probabilidad diaria de fallecimiento (Hazard Rate) holística.
         
         Integra la genética base (Gompertz) multiplicándola por los factores
-        dinámicos de desgaste vital (energía, estrés y trauma).
+        dinámicos de desgaste vital (energía, estrés, trauma, abandono) y
+        la letalidad de las infecciones activas.
+        
+        Args:
+            person: Entidad a evaluar.
+            pressure: Presión ambiental local.
+            
+        Returns:
+            Riesgo diario de muerte (hazard rate).
         """
         mortality_cfg = self.config.mortality
+        adoptions_cfg = self.config.adoptions
         time_cfg = self.config.time
         
         # 1. RIESGO BASE POR SENESCENCIA (Curva biológica natural)
@@ -49,17 +70,48 @@ class MortalitySystem:
         trauma_level = person.memory.get("trauma_overcrowding", 0.0)
         trauma_penalty = 1.0 + (trauma_level * 3.0)
 
-        # 3. PENALIZACIONES EXTERNAS (Entorno y Patógenos)
+        # PENALIZACIÓN POR ABANDONO (Huérfanos sin tutela)
+        abandonment_trauma = person.memory.get("trauma_abandonment", 0.0)
+        abandonment_penalty = 1.0 + (abandonment_trauma * (adoptions_cfg.abandonment_mortality_multiplier - 1.0))
+
+        # 3. PENALIZACIONES EXTERNAS (Entorno)
         environmental_penalty = 1.0 + (pressure * mortality_cfg.density_penalty_multiplier)
         
+        # =====================================================================
+        # NUEVO: PENALIZACIÓN POR ENFERMEDADES ACTIVAS (CON LETALIDAD)
+        # =====================================================================
+        # Calcular el riesgo combinado de todas las infecciones activas
+        # usando letalidad × virulencia de cada patógeno
         sickness_penalty = 1.0
         if getattr(person, 'is_sick', False):
-            raw_sickness_penalty = mortality_cfg.sickness_penalty_multiplier / max(mortality_cfg.genome_clamping, person.genome.immunity)
+            # Sumar el riesgo de todas las infecciones activas
+            total_infection_risk = 0.0
+            for pathogen in person.active_pathogens.values():
+                # Riesgo = letalidad × virulencia
+                # Letalidad alta + virulencia alta = riesgo máximo
+                infection_risk = pathogen.lethality * pathogen.virulence
+                total_infection_risk += infection_risk
+            
+            # Aplicar el riesgo total como penalización
+            # Usar la fórmula: penalty = base × (1 + risk)
+            # Donde base es el multiplier y risk amplifica el efecto
+            raw_sickness_penalty = mortality_cfg.sickness_penalty_multiplier * (1.0 + total_infection_risk)
             sickness_penalty = max(mortality_cfg.min_sickness_penalty, raw_sickness_penalty)
+            
+            # Logging detallado para debugging
+            if total_infection_risk > 0.1:
+                self.logger.debug(
+                    "🦠 Agente %s tiene %d infecciones activas, riesgo total: %.2f, penalty: %.2f",
+                    person.entity_id,
+                    len(person.active_pathogens),
+                    total_infection_risk,
+                    sickness_penalty,
+                )
             
         # Composición del riesgo total
         total_daily_risk = (
-            base_hazard * energy_penalty * stress_penalty * trauma_penalty * environmental_penalty * sickness_penalty
+            base_hazard * energy_penalty * stress_penalty * trauma_penalty * 
+            abandonment_penalty * environmental_penalty * sickness_penalty
         )
             
         return total_daily_risk
@@ -69,10 +121,18 @@ class MortalitySystem:
         
         Evalúa el estado de las variables dinámicas de la entidad en el momento 
         del fallo sistémico para proveer datos ricos al EvolutionEngine.
+        
+        Args:
+            person: Entidad fallecida.
+            pressure: Presión ambiental local.
+            
+        Returns:
+            Causa de muerte como string descriptivo.
         """
         energy = person.emotions.get("energy", 1.0)
         stress = person.emotions.get("stress", 0.0)
         trauma = person.memory.get("trauma_overcrowding", 0.0)
+        abandonment_trauma = person.memory.get("trauma_abandonment", 0.0)
         is_sick = getattr(person, 'is_sick', False)
 
         # Prioridad 1: Condiciones combinadas catastróficas
@@ -89,6 +149,10 @@ class MortalitySystem:
         # Prioridad 3: Colapsos del entorno/psicológicos
         if trauma > 0.8 or pressure > 2.0:
             return "Asfixia/Traumatismo severo por hacinamiento"
+        
+        # Muerte por abandono prolongado
+        if abandonment_trauma > 0.7 and stress > 0.8:
+            return "Colapso sistémico por abandono prolongado"
             
         if stress > 0.85:
             return "Colapso cardiovascular inducido por estrés crónico"
@@ -96,9 +160,21 @@ class MortalitySystem:
         # Prioridad 4: Muerte biológica
         return "Fallo sistémico por senectud (Causas naturales)"
 
-    def process(self, state: WorldState, pending: PendingChanges, 
-                delta_days: float, context: EnvironmentContext) -> None:
-        """Procesa el ciclo estocástico de mortalidad para todos los agentes activos."""
+    def process(
+        self,
+        state: WorldState,
+        pending: PendingChanges,
+        delta_days: float,
+        context: EnvironmentContext,
+    ) -> None:
+        """Procesa el ciclo estocástico de mortalidad para todos los agentes activos.
+        
+        Args:
+            state: Estado autoritativo del mundo.
+            pending: Búfer transaccional de cambios.
+            delta_days: Fracción de tiempo simulado.
+            context: Contexto del entorno actual.
+        """
         mortality_cfg = self.config.mortality
 
         for person in state.get_all_persons():
