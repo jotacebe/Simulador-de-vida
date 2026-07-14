@@ -24,7 +24,7 @@ class RelevantEventsFilter(logging.Filter):
         r"🚨",           # Brotes
         r"🌍",           # Cambios de estación
         r"👋",           # Encuentros entre agentes
-        #r"🤝",           # Relaciones UNKNOWN → ACQUAINTANCE
+        r"🤝",           # Relaciones UNKNOWN → ACQUAINTANCE
         r"👥",           # Amistades
         r"💕",           # Interés romántico
         r"🏠",           # Convivencia

@@ -27,6 +27,7 @@ Cada tick completo procesa las siguientes fases en estricto orden secuencial:
 
 5. Fase de Salud ('health'):
    - Resuelve interacciones inmunológicas y calcula contagios/recuperaciones.
+   - NUEVO: Emite eventos relacionales (cuidado, duelo) al RelationshipExperienceEngine.
 
 6. Fase Reproductiva ('reproduction'):
    - Verifica las ventanas de fertilidad e inicia concepciones.
@@ -48,7 +49,7 @@ búfer y altera los objetos de memoria.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Optional
 
 from core.config.simulation_config import SimulationConfig
 from core.execution.phase_executor import PhaseDefinition
@@ -75,6 +76,7 @@ from systems.movement.movement_system import MovementSystem
 # NUEVOS sistemas de relaciones (Fase 1)
 from systems.relationships.compatibility_engine import CompatibilityEngine
 from systems.relationships.relationship_manager import RelationshipManager
+from systems.relationships.relationship_experience_engine import RelationshipExperienceEngine  # <-- NUEVO
 
 from systems.reproduction.conception_system import ConceptionSystem
 from systems.reproduction.gestation_system import GestationSystem
@@ -84,15 +86,22 @@ from systems.temporal.temporal_system import TemporalSystem
 class PhaseScheduler:
     """Construye la lista maestra de fases y sistemas activos del motor."""
 
-    def __init__(self, config: SimulationConfig, event_bus: Any = None) -> None:
+    def __init__(
+        self, 
+        config: SimulationConfig, 
+        event_bus: Any = None,
+        relationship_engine: Optional[RelationshipExperienceEngine] = None,  # <-- NUEVO PARÁMETRO
+    ) -> None:
         """Inicializa el planificador orquestando la inyección de dependencias.
 
         Args:
             config: Configuración compartida de la simulación.
             event_bus: Bus de eventos opcional para sistemas que lo requieran.
+            relationship_engine: Motor de experiencias relacionales opcional.
         """
         self.config = config
         self.event_bus = event_bus
+        self.relationship_engine = relationship_engine  # <-- GUARDAR REFERENCIA
         self.logger = logging.getLogger(self.__class__.__name__)
 
     def build_phases(self) -> list[PhaseDefinition]:
@@ -171,7 +180,11 @@ class PhaseScheduler:
             PhaseDefinition(
                 name="health",
                 systems=[
-                    DiseaseSystem(self.config),
+                    # INYECCIÓN: Pasamos el motor de experiencias al sistema de enfermedades
+                    DiseaseSystem(
+                        config=self.config,
+                        relationship_engine=self.relationship_engine,  # <-- NUEVO
+                    ),
                 ],  # type: ignore[arg-type]
             ),
             PhaseDefinition(

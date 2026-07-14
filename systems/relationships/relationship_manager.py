@@ -1,11 +1,15 @@
-"""Gestor de transiciones relacionales y ciclo de vida.
+"""Gestor de evolución relacional basado en variables emocionales.
 
-Maneja la evolución de estados relacionales (progresiva y recesiva),
-decaimiento por inactividad, y permite impulsos de libre albedrío
-para saltos de estado no convencionales.
+Este sistema reemplaza el modelo de máquina de estados finitos por un
+modelo continuo donde:
+- Las variables emocionales (trust, attraction, etc.) cambian cada tick
+- El estado relacional es una consecuencia de las variables
+- Un clasificador determina el estado actual
 
-Este es el sistema central que reemplaza a MarriageSystem y
-RelationshipSystem en la gestión de vínculos entre agentes.
+Esto permite comportamientos emergentes más naturales:
+- Saltos de estado (de amigo a novio sin pasar por interés romántico)
+- Múltiples estados simultáneos
+- Relaciones que evolucionan orgánicamente
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ from systems.environment.environment_context import EnvironmentContext
 from systems.relationships.compatibility_engine import CompatibilityEngine
 from systems.relationships.relationship_model import (
     Relationship,
+    RelationshipClassifier,
     RelationshipStatus,
     RelationshipType,
     is_orientation_compatible,
@@ -29,7 +34,7 @@ from systems.relationships.relationship_model import (
 
 
 class RelationshipManager:
-    """Orquesta la evolución y transición de relaciones entre agentes."""
+    """Orquesta la evolución continua de relaciones entre agentes."""
 
     def __init__(
         self,
@@ -40,6 +45,9 @@ class RelationshipManager:
         self.rel_cfg = config.relationships
         self.compatibility = compatibility_engine
         self.logger = logging.getLogger(self.__class__.__name__)
+        
+        # Tracking de relaciones creadas este tick para evitar duplicados
+        self._relationships_created_this_tick: Set[tuple] = set()
 
     def process(
         self,
@@ -51,68 +59,28 @@ class RelationshipManager:
         """Evalúa y actualiza relaciones de todos los agentes vivos."""
         current_day = getattr(state, 'world_days_elapsed', 0.0)
         
+        # Limpiar tracking al inicio de cada tick
+        self._relationships_created_this_tick.clear()
+        
         for person in state.get_all_persons():
             if person.entity_id in pending.deaths:
                 continue
             
-            # 1. Decaimiento por inactividad
-            self._decay_inactive_relationships(person, current_day, delta_days)
+            # 1. Actualizar variables emocionales de relaciones existentes
+            self._update_emotional_variables(person, state, pending, current_day, delta_days)
             
-            # 2. Evaluar transiciones (progresivas y recesivas)
-            self._evaluate_transitions(person, state, current_day, pending)
-            
-            # 3. Detectar nuevas relaciones potenciales
+            # 2. Detectar nuevas relaciones potenciales
             self._detect_new_relationships(person, state, current_day, pending, context)
 
-    def _decay_inactive_relationships(
-        self,
-        person: Any,
-        current_day: float,
-        delta_days: float,
-    ) -> None:
-        """Decae relaciones por falta de interacción."""
-        for rel in person.relationships:
-            # ACQUAINTANCE, UNKNOWN y EX_PARTNER no pueden decaer
-            if rel.status in (
-                RelationshipStatus.UNKNOWN,
-                RelationshipStatus.EX_PARTNER,
-                RelationshipStatus.ACQUAINTANCE,
-            ):
-                continue
-            
-            days_inactive = rel.days_since_interaction(current_day)
-            
-            # Decaimiento gradual según estado
-            if rel.status == RelationshipStatus.CONSOLIDATED:
-                threshold = self.rel_cfg.max_days_unknown * 3.0
-            elif rel.status == RelationshipStatus.COHABITATION:
-                threshold = self.rel_cfg.max_days_unknown * 2.0
-            elif rel.status == RelationshipStatus.DATING:
-                threshold = self.rel_cfg.max_days_unknown
-            else:
-                threshold = self.rel_cfg.max_days_unknown * 0.5
-            
-            if days_inactive > threshold:
-                new_status = self._get_recessive_status(rel.status)
-                if new_status != rel.status:
-                    rel.status = new_status
-                    rel.add_event(current_day, f"decay:{new_status.value}")
-                    self.logger.debug(
-                        "🕳️ Agente %s: relación con %s decae a %s (inactividad: %.0f días)",
-                        person.entity_id,
-                        rel.partner_id,
-                        new_status.value,
-                        days_inactive,
-                    )
-
-    def _evaluate_transitions(
+    def _update_emotional_variables(
         self,
         person: Any,
         state: WorldState,
-        current_day: float,
         pending: PendingChanges,
+        current_day: float,
+        delta_days: float,
     ) -> None:
-        """Evalúa transiciones de estado basadas en afinidad y tiempo."""
+        """Actualiza las variables emocionales de todas las relaciones del agente."""
         for rel in person.relationships:
             if rel.status == RelationshipStatus.EX_PARTNER:
                 continue
@@ -121,164 +89,81 @@ class RelationshipManager:
             if not partner or partner.entity_id in pending.deaths:
                 continue
             
-            # Calcular afinidad actual
-            current_affinity = self.compatibility.calculate_compatibility(person, partner)
-            rel.affinity = current_affinity
+            # Guardar estado anterior para detectar cambios
+            old_status = RelationshipClassifier.classify(rel)
             
-            # TRANSICIÓN HACIA ATRÁS (Recesiva)
-            if self._try_recess_transition(person, rel, current_day):
-                continue
+            # Calcular calidad de interacción basada en proximidad y afinidad
+            distance = math.hypot(person.x - partner.x, person.y - partner.y)
+            proximity = max(0.0, 1.0 - (distance / 50.0))
             
-            # TRANSICIÓN HACIA ADELANTE (Progresiva)
-            self._try_progress_transition(person, rel, partner, current_day)
+            # NUEVO: Interacción virtual para relaciones existentes
+            # Si ya tienen una relación establecida, pueden interactuar incluso a distancia
+            relationship_strength = (rel.trust + rel.attachment + rel.familiarity) / 300.0
+            virtual_interaction_bonus = relationship_strength * 0.3
+            
+            # Calidad de interacción: combina proximidad con bonus de relación existente
+            # Si están cerca, la interacción es positiva
+            # Si están lejos pero tienen relación fuerte, hay interacción virtual
+            if proximity > 0.3:
+                interaction_quality = proximity * 0.5 + virtual_interaction_bonus
+            elif rel.familiarity > 30:  # Si ya se conocen bien
+                interaction_quality = virtual_interaction_bonus
+            else:
+                interaction_quality = 0.0
+            
+            # Actualizar variables emocionales
+            rel.update_emotional_variables(delta_days, interaction_quality, proximity)
+            
+            # Recalcular estado usando el clasificador
+            new_status = RelationshipClassifier.classify(rel)
+            
+            # Loguear si el estado cambió
+            if new_status != old_status and person.entity_id < partner.entity_id:
+                self._log_status_change(person, partner, old_status, new_status, rel)
 
-    def _try_progress_transition(
+    def _log_status_change(
         self,
         p1: Any,
-        rel: Relationship,
         p2: Any,
-        current_day: float,
-    ) -> bool:
-        """Intenta avanzar un estado relacional."""
-        cfg = self.rel_cfg
-        affinity = rel.affinity
-        days_active = rel.days_active(current_day)
-        
-        # Probabilidad base de transición
-        transition_chance = affinity * 0.08
-        
-        # UNKNOWN → ACQUAINTANCE
-        if rel.status == RelationshipStatus.UNKNOWN:
-            distance = abs(p1.x - p2.x) + abs(p1.y - p2.y)
-            if distance < 20 and random.random() < 0.15:
-                rel.status = RelationshipStatus.ACQUAINTANCE
-                rel.add_event(current_day, "met")
-                # CORRECCIÓN: Loguear solo una vez por par (ID menor)
-                if p1.entity_id < p2.entity_id:
-                    self.logger.info(
-                        "🤝 Agente %s y %s se conocen (distancia: %d)",
-                        p1.entity_id, p2.entity_id, distance
-                    )
-                return True
-        
-        # ACQUAINTANCE → FRIENDSHIP
-        elif rel.status == RelationshipStatus.ACQUAINTANCE:
-            if affinity > 0.45 and random.random() < transition_chance:
-                rel.status = RelationshipStatus.FRIENDSHIP
-                rel.add_event(current_day, "became_friends")
-                if p1.entity_id < p2.entity_id:
-                    self.logger.info(
-                        "👥 Agente %s y %s se hacen amigos (afinidad: %.2f)",
-                        p1.entity_id, p2.entity_id, affinity
-                    )
-                return True
-        
-        # FRIENDSHIP → ROMANTIC_INTEREST
-        elif rel.status == RelationshipStatus.FRIENDSHIP:
-            if affinity > cfg.min_affinity_for_dating and random.random() < transition_chance * 0.7:
-                rel.status = RelationshipStatus.ROMANTIC_INTEREST
-                rel.add_event(current_day, "romantic_interest")
-                if p1.entity_id < p2.entity_id:
-                    self.logger.info(
-                        "💕 Agente %s y %s tienen interés romántico (afinidad: %.2f)",
-                        p1.entity_id, p2.entity_id, affinity
-                    )
-                return True
-        
-        # ROMANTIC_INTEREST → DATING
-        elif rel.status == RelationshipStatus.ROMANTIC_INTEREST:
-            if affinity > cfg.min_affinity_for_dating and random.random() < transition_chance:
-                rel.status = RelationshipStatus.DATING
-                rel.add_event(current_day, "started_dating")
-                if p1.entity_id < p2.entity_id:
-                    self.logger.info(
-                        "❤️ Agente %s y %s comienzan a salir (afinidad: %.2f)",
-                        p1.entity_id, p2.entity_id, affinity
-                    )
-                return True
-        
-        # DATING → COHABITATION
-        elif rel.status == RelationshipStatus.DATING:
-            if (affinity > cfg.min_affinity_for_cohabitation and
-                days_active > cfg.min_days_for_cohabitation and
-                random.random() < transition_chance * 0.4):
-                rel.status = RelationshipStatus.COHABITATION
-                rel.add_event(current_day, "moved_in_together")
-                if p1.entity_id < p2.entity_id:
-                    self.logger.info(
-                        "🏠 Agente %s y %s conviven (afinidad: %.2f, días: %.0f)",
-                        p1.entity_id, p2.entity_id, affinity, days_active
-                    )
-                return True
-        
-        # COHABITATION → CONSOLIDATED
-        elif rel.status == RelationshipStatus.COHABITATION:
-            if (affinity > cfg.min_affinity_for_consolidated and
-                days_active > cfg.min_days_for_consolidated and
-                random.random() < transition_chance * 0.3):
-                rel.status = RelationshipStatus.CONSOLIDATED
-                rel.add_event(current_day, "consolidated_relationship")
-                if p1.entity_id < p2.entity_id:
-                    self.logger.info(
-                        "💍 Agente %s y %s consolidan relación (afinidad: %.2f, días: %.0f)",
-                        p1.entity_id, p2.entity_id, affinity, days_active
-                    )
-                return True
-        
-        return False
-
-    def _try_recess_transition(
-        self,
-        p1: Any,
+        old_status: RelationshipStatus,
+        new_status: RelationshipStatus,
         rel: Relationship,
-        current_day: float,
-    ) -> bool:
-        """Maneja degradación o ruptura de relaciones."""
-        cfg = self.rel_cfg
-        affinity = rel.affinity
+    ) -> None:
+        """Registra el cambio de estado en el log."""
+        # Solo loguear transiciones significativas
+        significant_transitions = {
+            (RelationshipStatus.UNKNOWN, RelationshipStatus.ACQUAINTANCE): "🤝",
+            (RelationshipStatus.ACQUAINTANCE, RelationshipStatus.FRIENDSHIP): "👥",
+            (RelationshipStatus.FRIENDSHIP, RelationshipStatus.ROMANTIC_INTEREST): "💕",
+            (RelationshipStatus.ROMANTIC_INTEREST, RelationshipStatus.DATING): "❤️",
+            (RelationshipStatus.DATING, RelationshipStatus.COHABITATION): "🏠",
+            (RelationshipStatus.COHABITATION, RelationshipStatus.CONSOLIDATED): "💍",
+        }
         
-        # Protección de "luna de miel"
-        if rel.status == RelationshipStatus.CONSOLIDATED:
-            days_active = rel.days_active(current_day)
-            if days_active < 365.0:
-                return False
-        
-        # Ruptura formal: afinidad muy baja
-        if affinity < cfg.breakup_affinity_threshold:
-            if rel.status not in (
-                RelationshipStatus.EX_PARTNER,
-                RelationshipStatus.UNKNOWN,
-                RelationshipStatus.ACQUAINTANCE,
-            ):
-                old_status = rel.status
-                rel.status = RelationshipStatus.EX_PARTNER
-                rel.add_event(current_day, f"breakup_from:{old_status.value}")
-                # CORRECCIÓN: Loguear solo una vez por par
-                if p1.entity_id < rel.partner_id:
-                    self.logger.info(
-                        "💔 Ruptura: %s y %s (afinidad: %.2f, estado previo: %s)",
-                        p1.entity_id,
-                        rel.partner_id,
-                        affinity,
-                        old_status.value,
-                    )
-                return True
-        
-        # Degradación: COHABITATION/CONSOLIDATED → DATING
-        if affinity < cfg.casual_affinity_threshold:
-            if rel.status in (RelationshipStatus.COHABITATION, RelationshipStatus.CONSOLIDATED):
-                rel.status = RelationshipStatus.DATING
-                rel.add_event(current_day, "degrade:dating")
-                return True
-        
-        # Degradación: DATING/ROMANTIC_INTEREST → FRIENDSHIP
-        if affinity < cfg.friendship_recovery_threshold:
-            if rel.status in (RelationshipStatus.DATING, RelationshipStatus.ROMANTIC_INTEREST):
-                rel.status = RelationshipStatus.FRIENDSHIP
-                rel.add_event(current_day, "degrade:friendship")
-                return True
-        
-        return False
+        transition_key = (old_status, new_status)
+        if transition_key in significant_transitions:
+            emoji = significant_transitions[transition_key]
+            self.logger.info(
+                "%s Agente %s y %s: %s → %s (trust: %.1f, attraction: %.1f, commitment: %.1f)",
+                emoji,
+                p1.entity_id,
+                p2.entity_id,
+                old_status.value,
+                new_status.value,
+                rel.trust,
+                rel.attraction,
+                rel.commitment,
+            )
+        elif new_status == RelationshipStatus.EX_PARTNER:
+            self.logger.info(
+                "💔 Ruptura: Agente %s y %s (trust: %.1f, conflict: %.1f, commitment: %.1f, attachment: %.1f)",
+                p1.entity_id,
+                p2.entity_id,
+                rel.trust,
+                rel.conflict,
+                rel.commitment,
+                rel.attachment,
+            )
 
     def _detect_new_relationships(
         self,
@@ -294,7 +179,8 @@ class RelationshipManager:
         # Obtener amigos de persona para calcular triángulos sociales
         friends_of_person: Set[int] = set()
         for rel in person.relationships:
-            if rel.status in (
+            classified_status = RelationshipClassifier.classify(rel)
+            if classified_status in (
                 RelationshipStatus.FRIENDSHIP,
                 RelationshipStatus.ROMANTIC_INTEREST,
                 RelationshipStatus.DATING,
@@ -309,14 +195,17 @@ class RelationshipManager:
             if other.entity_id in pending.deaths:
                 continue
             
-            # CORRECCIÓN CRÍTICA: Solo procesar cada par una vez (ID menor procesa)
+            # Solo el agente con menor ID procesa para evitar duplicados
             if person.entity_id >= other.entity_id:
                 continue
             
-            # Verificación de seguridad adicional
+            # Verificar que no exista la relación
             if person.get_relationship_with(other.entity_id):
                 continue
-            if other.get_relationship_with(person.entity_id):
+            
+            # Verificar tracking
+            relationship_key = tuple(sorted([person.entity_id, other.entity_id]))
+            if relationship_key in self._relationships_created_this_tick:
                 continue
             
             # Verificar proximidad física
@@ -344,14 +233,16 @@ class RelationshipManager:
                 friend = state.get_person_by_id(friend_id)
                 if friend:
                     friend_rel = friend.get_relationship_with(other.entity_id)
-                    if friend_rel and friend_rel.status in (
-                        RelationshipStatus.FRIENDSHIP,
-                        RelationshipStatus.ROMANTIC_INTEREST,
-                        RelationshipStatus.DATING,
-                        RelationshipStatus.COHABITATION,
-                        RelationshipStatus.CONSOLIDATED,
-                    ):
-                        common_friends += 1
+                    if friend_rel:
+                        friend_status = RelationshipClassifier.classify(friend_rel)
+                        if friend_status in (
+                            RelationshipStatus.FRIENDSHIP,
+                            RelationshipStatus.ROMANTIC_INTEREST,
+                            RelationshipStatus.DATING,
+                            RelationshipStatus.COHABITATION,
+                            RelationshipStatus.CONSOLIDATED,
+                        ):
+                            common_friends += 1
             
             if common_friends > 0:
                 triangle_bonus = base_chance * (common_friends * 0.5)
@@ -359,46 +250,43 @@ class RelationshipManager:
             meet_chance = base_chance + triangle_bonus
             
             if random.random() < meet_chance:
-                # Crear relación bidireccional
+                # Crear relación bidireccional con variables emocionales iniciales
                 affinity = self.compatibility.calculate_compatibility(person, other)
                 
-                person.add_relationship(
+                # Inicializar con familiaridad baja (acaban de conocerse)
+                new_rel = Relationship(
                     partner_id=other.entity_id,
                     status=RelationshipStatus.UNKNOWN,
-                    current_day=current_day,
+                    start_date=current_day,
+                    last_interaction=current_day,
                     affinity=affinity,
+                    relationship_type=RelationshipType.EXCLUSIVE,
                 )
+                # Familiaridad inicial baja
+                new_rel.familiarity = 10.0
+                # Respeto básico
+                new_rel.respect = 30.0
                 
-                other.add_relationship(
+                person._relationships.append(new_rel)
+                
+                # Crear relación inversa
+                reverse_rel = Relationship(
                     partner_id=person.entity_id,
                     status=RelationshipStatus.UNKNOWN,
-                    current_day=current_day,
+                    start_date=current_day,
+                    last_interaction=current_day,
                     affinity=affinity,
+                    relationship_type=RelationshipType.EXCLUSIVE,
                 )
+                reverse_rel.familiarity = 10.0
+                reverse_rel.respect = 30.0
+                
+                other._relationships.append(reverse_rel)
+                
+                # Marcar como creada este tick
+                self._relationships_created_this_tick.add(relationship_key)
                 
                 self.logger.debug(
                     "👋 Día %.0f: Agente %s conoce a %s (distancia: %.1f, afinidad: %.2f)",
                     current_day, person.entity_id, other.entity_id, distance, affinity
                 )
-
-    def _get_recessive_status(self, current: RelationshipStatus) -> RelationshipStatus:
-        """Obtiene el estado recesivo siguiente."""
-        hierarchy = [
-            RelationshipStatus.CONSOLIDATED,
-            RelationshipStatus.COHABITATION,
-            RelationshipStatus.DATING,
-            RelationshipStatus.ROMANTIC_INTEREST,
-            RelationshipStatus.CASUAL,
-            RelationshipStatus.FRIENDSHIP,
-            RelationshipStatus.ACQUAINTANCE,
-            RelationshipStatus.UNKNOWN,
-        ]
-        
-        try:
-            idx = hierarchy.index(current)
-            if idx < len(hierarchy) - 1:
-                return hierarchy[idx + 1]
-        except ValueError:
-            pass
-        
-        return RelationshipStatus.UNKNOWN

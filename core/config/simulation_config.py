@@ -356,9 +356,9 @@ class RelationshipsConfig:
         # TRANSICIONES DE ESTADO
         # =====================================================================
         # Umbrales mínimos de afinidad para avanzar de estado
-        self.min_affinity_for_dating: float = 0.65
-        self.min_affinity_for_cohabitation: float = 0.70
-        self.min_affinity_for_consolidated: float = 0.75
+        self.min_affinity_for_dating: float = 0.50
+        self.min_affinity_for_cohabitation: float = 0.55
+        self.min_affinity_for_consolidated: float = 0.60
         
         # Días mínimos en un estado antes de poder avanzar al siguiente
         self.min_days_for_cohabitation: float = 180.0   # ~6 meses
@@ -374,9 +374,10 @@ class RelationshipsConfig:
         # RECESIVIDAD Y RUPTURA
         # =====================================================================
         # Umbrales de afinidad para degradar/romper relaciones
-        self.breakup_affinity_threshold: float = 0.35   # Por debajo → ruptura
-        self.casual_affinity_threshold: float = 0.55    # Por debajo → decae a dating
-        self.friendship_recovery_threshold: float = 0.45 # Por debajo → decae a friendship
+        self.breakup_affinity_threshold: float = 0.30  # Más difícil romper la relación
+        self.casual_affinity_threshold: float = 0.50  # Más difícil degradar a casual
+        self.friendship_recovery_threshold: float = 0.40  # Más difícil volver a solo amigos
+        self.max_days_unknown: float = 548.0  # ~1.5 años sin interacción antes de decaer
         
         # =====================================================================
         # LEGACY (mantenido para compatibilidad)
